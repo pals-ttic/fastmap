@@ -32,7 +32,7 @@ if __name__ == "__main__":
         "--config",
         type=str,
         default=None,
-        help="Path to YAML config file. See fastmap/config.yaml for an example.",
+        help="Path to YAML config file. See fastmap/config.py for all the options.",
     )
     parser.add_argument(
         "--image_dir",
