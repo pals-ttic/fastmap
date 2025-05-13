@@ -1,7 +1,7 @@
 # FastMap: Revisiting Dense and Scalable Structure from Motion
 A fast structure from motion pipeline written in Pytorch for images densely covering a scene.
 
-**NOTE**: *We recently tested the newly added GPU support in GLOMAP. Paired with powerful CPUs, it runs much faster than the CPU version, and the speed gap between FastMap and GLOMAP is smaller than reported in the current version of the paper. We are trying to get more detailed timing results on different hardware configurations and will report them soon.*
+**NOTE**: *We recently tested the newly added GPU support in GLOMAP. Paired with powerful CPUs, it runs much faster than the pure CPU version, and the speed gap between FastMap and GLOMAP is smaller than reported in the current version of the paper. We are trying to get more detailed timing results on different hardware configurations and will report them soon.*
 
 \[[Paper](http://arxiv.org/abs/2505.04612)\] \[[Project Page](https://jiahao.ai/fastmap)\]
 
@@ -89,6 +89,9 @@ Images, pre-computed databases and ground truths to reproduce our benchmarks are
 GLOMAP/COLMAP container:
 - the singularity container `.sif` is in the data repo.
 - the docker container and Dockerfile are [here](https://hub.docker.com/r/haochenw/glomap/tags)
+
+## Limitations
+This method works best on datasets with high quality images intended for dense 3D reconstruction (e.g. as a proprocessing step before NeRF). It trade robustness for simplicity and speed, so is not particularly careful in countering the negative effect of outlier matches. In cases like sparse scene coverage, low quality matching, degenerate motions (e.g. colinear translation), it is less robust than COLMAP and GLOMAP, and is prone to catastrophic failures.
 
 ## BibTeX
 If you use this tool for your research please cite the following paper
