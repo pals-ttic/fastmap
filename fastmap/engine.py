@@ -197,13 +197,14 @@ def engine(
 
     # asynchronously read color for 2D points in tracks
     if image_dir is not None:
-        color_reader = TrackColor2DReader(
-            tracks=tracks,
-            images=images,
-            image_dir=image_dir,
-            use_cpu=True,
-        )
-        color_reader.start()
+        with timer("Populate Color Reading Queue"):
+            color_reader = TrackColor2DReader(
+                tracks=tracks,
+                images=images,
+                image_dir=image_dir,
+                use_cpu=True,
+            )
+            color_reader.start()
         logger.info("Started asynchronous color reader for 2D points")
     else:
         color_reader = None
@@ -258,7 +259,8 @@ def engine(
     # wait for the color reader to finish
     if color_reader is not None:
         logger.info("Waiting for color reader to finish...")
-        color2d = color_reader.join()
+        with timer("Wait for Color Reading"):
+            color2d = color_reader.join()
         logger.info("Color reader finished")
     else:
         color2d = None

@@ -26,7 +26,7 @@ The structure from motion pipeline consists of two parts: feature matching and p
 colmap feature_extractor --database_path /path/to/your/database.db --image_path /path/to/your/image/directory
 # matching
 colmap exhaustive_matcher --database_path /path/to/your/database.db
-# pose estimation with FastMap (if you do not need the colored point cloud, you may omit the --image_dir option)
+# pose estimation with FastMap (if you do not need the colored point cloud, you may omit the --image_dir option for some potential speedup)
 python run.py --database /path/to/your/database.db --image_dir /path/to/your/image/directory --output_dir /your/output/directory
 ```
 An interactive visualization will appear after FastMap finishes, and the results will be stored in the provided output directory in the same [format](https://colmap.github.io/format.html) as COLMAP. Please refer to the official COLMAP [tutorial](https://colmap.github.io/tutorial.html) and [command-line interface guide](https://colmap.github.io/cli.html) for various options that can be passed to the feature extractor and matcher (e.g., accelerating with GPUs).
