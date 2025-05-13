@@ -1,6 +1,8 @@
 # FastMap: Revisiting Dense and Scalable Structure from Motion
 A fast structure from motion pipeline written in Pytorch for images densely covering a scene.
 
+**NOTE**: *We recently tested the newly added GPU support in GLOMAP. Paired with powerful CPUs, it runs much faster than the CPU version, and the speed gap between FastMap and GLOMAP is smaller than reported in the current version of the paper. We are trying to get more detailed timing results on different hardware configurations and will report them soon.*
+
 \[[Paper](http://arxiv.org/abs/2505.04612)\] \[[Project Page](https://jiahao.ai/fastmap)\]
 
 ![teaser](assets/teaser.png)
