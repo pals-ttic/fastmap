@@ -164,12 +164,25 @@ def initialization(
     AT_A = torch.sparse_coo_tensor(
         indices=AT_A_indices, values=AT_A_values, size=(num_images * 3, num_images * 3)
     )  # sparse_coo(num_images * 3, num_images * 3)
-    logger.info(
-        f"Solving x column using torch.lobpcg on sparse matrix of shape {' x '.join(map(str, AT_A.shape))}..."
-    )
-    xcol = torch.lobpcg(AT_A, k=1, largest=False, method="ortho")[
-        1
-    ].squeeze()  # (num_images * 3,)
+
+    # solve (first use SVD; if OOM, use lobpcg)
+    try:
+        logger.info(
+            f"Solving x column using SVD on dense matrix of shape {' x '.join(map(str, AT_A.shape))}..."
+        )
+        xcol = torch.linalg.svd(AT_A.to_dense()).Vh[-1]  # (num_images * 3,)
+    except RuntimeError as e:
+        if "out of memory" not in str(e).lower():
+            raise e
+        logger.info(
+            f"OOM detected when applying SVD on dense matrix of shape {' x '.join(map(str, AT_A.shape))}..."
+        )
+        logger.info(
+            f"Solving x column using torch.lobpcg on sparse matrix of shape {' x '.join(map(str, AT_A.shape))}..."
+        )
+        xcol = torch.lobpcg(AT_A, k=1, largest=False, method="ortho")[
+            1
+        ].squeeze()  # (num_images * 3,)
     xcol = xcol.view(num_images, 3)  # (num_images, 3)
     del AT_A
 
@@ -207,7 +220,7 @@ def initialization(
     )  # (2, num_valid_images * 9)
     del AT_A_row_idx, AT_A_col_idx
 
-    # construct the sparse matrix and solve
+    # construct the sparse matrix
     assert AT_A_ortho_values.shape[0] == AT_A_ortho_indices.shape[1]
     AT_A = torch.sparse_coo_tensor(
         indices=AT_A_indices, values=AT_A_values, size=(num_images * 3, num_images * 3)
@@ -218,12 +231,25 @@ def initialization(
     )  # sparse_coo(num_images * 3, num_images * 3)
     AT_A = AT_A.coalesce()
     del AT_A_values, AT_A_indices, AT_A_ortho_values, AT_A_ortho_indices
-    logger.info(
-        f"Solving y column using torch.lobpcg on sparse matrix of shape {' x '.join(map(str, AT_A.shape))}..."
-    )
-    ycol = torch.lobpcg(AT_A, k=1, largest=False, method="ortho")[
-        1
-    ].squeeze()  # (num_images * 3,)
+
+    # solve (first use SVD; if OOM, use lobpcg)
+    try:
+        logger.info(
+            f"Solving y column using SVD on dense matrix of shape {' x '.join(map(str, AT_A.shape))}..."
+        )
+        ycol = torch.linalg.svd(AT_A.to_dense()).Vh[-1]  # (num_images * 3,)
+    except RuntimeError as e:
+        if "out of memory" not in str(e).lower():
+            raise e
+        logger.info(
+            f"OOM detected when applying SVD on dense matrix of shape {' x '.join(map(str, AT_A.shape))}..."
+        )
+        logger.info(
+            f"Solving y column using torch.lobpcg on sparse matrix of shape {' x '.join(map(str, AT_A.shape))}..."
+        )
+        ycol = torch.lobpcg(AT_A, k=1, largest=False, method="ortho")[
+            1
+        ].squeeze()  # (num_images * 3,)
     ycol = ycol.view(num_images, 3)  # (num_images, 3)
     del AT_A
 
