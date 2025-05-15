@@ -458,23 +458,29 @@ def example_usage():
 @torch.no_grad()
 def _build_cameras_container(
     image_names: List,
-    colmap_camera_params: torch.Tensor,
+    colmap_cameras_focal: torch.Tensor,
+    colmap_cameras_cx: torch.Tensor,
+    colmap_cameras_cy: torch.Tensor,
+    colmap_cameras_k1: torch.Tensor,
     is_prior: torch.Tensor,
     colmap_camera_ids: torch.Tensor,
 ) -> Cameras:
     """Builds a Cameras container from camera parameters and camera ids from a COLMAP database. Note that the detected number of cameras might be different from the number of cameras in the database because images from different subdirectories are considered to be from different cameras.
     Args:
         image_names: A list of image names. Note that the name might be a path containing multiple slashes (subdirectories). Images in different subdirectories should be considered from different cameras.
-        colmap_camera_params: A tensor of shape (num_colmap_cameras, 4) containing the camera parameters (focal, cx, cy, k1).
+        colmap_cameras_focal: A tensor of shape (num_colmap_cameras,) containing the focal length of the cameras read from the COLMAP database.
+        colmap_cameras_cx: A tensor of shape (num_colmap_cameras,) containing the cx of the cameras read from the COLMAP database.
+        colmap_cameras_cy: A tensor of shape (num_colmap_cameras,) containing the cy of the cameras read from the COLMAP database.
+        colmap_cameras_k1: A tensor of shape (num_colmap_cameras,) containing the k1 of the cameras read from the COLMAP database.
         is_prior: A tensor of shape (num_colmap_cameras,) containing a boolean indicating whether the camera is a prior.
         colmap_camera_ids: A tensor of shape (num_images,) containing the camera ids (starting from 1).
     Returns:
         A Cameras container. Note that the number of distinct cameras and the camera idx are possibly different.
     """
     # get information
-    device = colmap_camera_params.device
+    device = colmap_cameras_focal.device
+    dtype = colmap_cameras_focal.dtype
     num_images = colmap_camera_ids.shape[0]
-    num_colmap_cameras = colmap_camera_params.shape[0]
     assert colmap_camera_ids.min() == 1  # make sure colmap camera ids are 1-based
 
     # get a unique id for each directory
@@ -489,21 +495,25 @@ def _build_cameras_container(
 
     # get unique dir_id, focal, cx, cy, is_prior combinations
     unique_items, camera_idx = torch.unique(
-        torch.cat(
+        torch.stack(
             [
-                colmap_camera_params[colmap_camera_ids - 1][:, :3],
-                dir_ids.to(colmap_camera_params).unsqueeze(-1),
-                is_prior[colmap_camera_ids - 1].to(colmap_camera_params).unsqueeze(-1),
+                colmap_cameras_focal[colmap_camera_ids - 1],
+                colmap_cameras_cx[colmap_camera_ids - 1],
+                colmap_cameras_cy[colmap_camera_ids - 1],
+                colmap_cameras_k1[colmap_camera_ids - 1],
+                dir_ids.to(device=device, dtype=dtype),
+                is_prior[colmap_camera_ids - 1].to(device=device, dtype=dtype),
             ],
             dim=-1,
         ),
         return_inverse=True,
         dim=0,
-    )  # (num_cameras,), (num_images,) note that here the camera idx is 0-based
+    )  # (num_cameras, 5), (num_images,) note that here camera_idx is 0-based
     focal_prior = unique_items[:, 0]  # (num_cameras,)
     focal = focal_prior.clone()  # (num_cameras,)
     cx = unique_items[:, 1]  # (num_cameras,)
     cy = unique_items[:, 2]  # (num_cameras,)
+    k1 = unique_items[:, 3]  # (num_cameras,)
     num_cameras = unique_items.shape[0]
     del dir_ids, unique_items, is_prior
 
@@ -513,6 +523,7 @@ def _build_cameras_container(
     assert focal_prior.shape == (num_cameras,)
     assert cx.shape == (num_cameras,)
     assert cy.shape == (num_cameras,)
+    assert k1.shape == (num_cameras,)
     cameras = Cameras(
         camera_idx=camera_idx,
         focal=focal,
@@ -520,7 +531,7 @@ def _build_cameras_container(
         calibrated=False,
         cx=cx,
         cy=cy,
-        k1=torch.zeros_like(focal),
+        k1=k1,
     )
 
     # return
@@ -586,6 +597,8 @@ def read_database(
                 "is_prior": camera_is_prior,
             }
         )
+
+    # sort cameras by id
     colmap_cameras = sorted(colmap_cameras, key=lambda x: x["id"])
     assert torch.all(
         torch.tensor([cam["id"] for cam in colmap_cameras])
@@ -604,21 +617,59 @@ def read_database(
         images.heights[image_idx] = colmap_cameras[camera_id - 1]["image_height"]
     del image_names
 
-    # build Cameras container
-    colmap_camera_params = torch.stack(
-        [cam["camera_params"] for cam in colmap_cameras], dim=0
-    )  # (num_colmap_cameras, 4)
+    # define supported camera model types (the values are the same as in colmap)
+    class CAMERA_MODEL_TYPE(Enum):
+        SIMPLE_PINHOLE = 1
+        SIMPLE_RADIAL = 2
+
+    # separate the camera parameters
+    num_colmap_cameras = len(colmap_cameras)
     is_prior = torch.tensor(
         [cam["is_prior"] for cam in colmap_cameras], dtype=torch.bool, device=device
     )  # (num_colmap_cameras,)
+    colmap_cameras_focal = torch.zeros(
+        num_colmap_cameras, device=device, dtype=torch.float32
+    )  # (num_colmap_cameras,)
+    colmap_cameras_cx = torch.zeros(
+        num_colmap_cameras, device=device, dtype=torch.float32
+    )  # (num_colmap_cameras,)
+    colmap_cameras_cy = torch.zeros(
+        num_colmap_cameras, device=device, dtype=torch.float32
+    )  # (num_colmap_cameras,)
+    colmap_cameras_k1 = torch.zeros(
+        num_colmap_cameras, device=device, dtype=torch.float32
+    )  # (num_colmap_cameras,)
+    for i in range(num_colmap_cameras):
+        cam = colmap_cameras[i]
+        if cam["model_type"] == CAMERA_MODEL_TYPE.SIMPLE_PINHOLE.value:
+            colmap_cameras_focal[i] = (
+                cam["camera_params"][0] + cam["camera_params"][1]
+            ) / 2.0
+            colmap_cameras_cx[i] = cam["camera_params"][2]
+            colmap_cameras_cy[i] = cam["camera_params"][3]
+            colmap_cameras_k1[i] = 0.0
+        elif cam["model_type"] == CAMERA_MODEL_TYPE.SIMPLE_RADIAL.value:
+            colmap_cameras_focal[i] = cam["camera_params"][0]
+            colmap_cameras_cx[i] = cam["camera_params"][1]
+            colmap_cameras_cy[i] = cam["camera_params"][2]
+            colmap_cameras_k1[i] = cam["camera_params"][3]
+        else:
+            raise ValueError(
+                f"Currently only support SIMPLE_PINHOLE (1) and SIMPLE_RADIAL (2) camera models, but got {cam['model_type']}."
+            )
     del colmap_cameras
+
+    # build Cameras container
     cameras: Cameras = _build_cameras_container(
         image_names=images.names,
-        colmap_camera_params=colmap_camera_params,
+        colmap_cameras_focal=colmap_cameras_focal,
+        colmap_cameras_cx=colmap_cameras_cx,
+        colmap_cameras_cy=colmap_cameras_cy,
+        colmap_cameras_k1=colmap_cameras_k1,
         is_prior=is_prior,
         colmap_camera_ids=camera_ids,
     )
-    del colmap_camera_params, is_prior, camera_ids
+    del is_prior, camera_ids
     logger.info(f"Found {cameras.num_cameras} unique cameras in the database.")
 
     # intialize result dict for matches
