@@ -334,11 +334,20 @@ def write_images_binary(images: Dict[int, Image], path: str):
                 format_char_sequence=f"{len(binary_image_name)+1}s",
             )
             del binary_image_name
-            # TODO: support writing 2D and 3D points
-            assert image.xys is None  # do not write 2D points
-            assert image.point3D_ids is None  # do not write 3D points
-            num_points2D = 0
+            num_points2D = len(image.xys)
+            assert num_points2D == len(image.point3D_ids)
             write_next_bytes(fid, data=num_points2D, format_char_sequence="Q")
+            x_y_id_s = []
+            for i in range(num_points2D):
+                x_y_id_s.append(image.xys[i][0])  # x
+                x_y_id_s.append(image.xys[i][1])  # y
+                x_y_id_s.append(image.point3D_ids[i])  # point3D_id
+            write_next_bytes(
+                fid,
+                data=x_y_id_s,
+                format_char_sequence="ddq" * num_points2D,
+            )
+            del x_y_id_s
 
 
 def read_points3D_text(path):
@@ -672,8 +681,8 @@ def write_model(
             tvec=tvec,
             camera_id=camera_id,
             name=image_name,
-            xys=None,  # TODO: correctly write the 2D points
-            point3D_ids=None,  # TODO: correctly write the 3D points
+            xys=[],  # will be filled later
+            point3D_ids=[],  # will be filled later
         )
 
     # convert from Points3DContainer to Dict[int, Point3D]
@@ -686,22 +695,37 @@ def write_model(
         rgb = points3d.rgb[i].cpu().numpy()  # array (3,)
         error = points3d.error[i].cpu().numpy()  # array (,)
 
-        # get image_ids and point2D_idxs
-        image_ids = 1 + np.array(
-            points3d.track_image_idx[i]
-        )  # array, image_ids is 1-based
-        point2D_idxs = np.array(
-            points3d.track_keypoint_idx[i]
-        )  # array, point2D_idxs is 0-based
-
         points3d_dict[point3D_id] = Point3D(
             id=point3D_id,
             xyz=xyz,
             rgb=rgb,
             error=error,
-            image_ids=image_ids,
-            point2D_idxs=point2D_idxs,
+            image_ids=[],  # will be filled later
+            point2D_idxs=[],  # will be filled later
         )
+
+    # fill the lists in each Image and Point3D
+    for i in range(points3d.num_points):
+        point3D_id = i + 1  # point3D_id is 1-based under COLMAP format
+
+        # get data
+        image_idx_list = points3d.image_idx_lists[i]  # list of image indices (0-based)
+        xy_pixels_list = points3d.xy_pixels_lists[i]  # list of (x, y) tuples
+
+        # fill the xys and point3D_ids for each image
+        for image_idx, xy_pixels in zip(image_idx_list, xy_pixels_list):
+            # image_idx is 0-based, convert it to 1-based to comply with COLMAP format
+            image_id = image_idx + 1
+
+            # fill the lists in the corresponding Image
+            images_dict[image_id].xys.append(xy_pixels)
+            images_dict[image_id].point3D_ids.append(point3D_id)
+
+            # fill the lists in the corresponding Point3D
+            points3d_dict[point3D_id].image_ids.append(image_id)
+            points3d_dict[point3D_id].point2D_idxs.append(
+                len(images_dict[image_id].xys) - 1
+            )  # 0-based
 
     # write the cameras
     camera_path = os.path.join(save_dir, "cameras.bin")
