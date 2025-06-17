@@ -538,6 +538,9 @@ def read_model(
     focal = torch.nan + torch.zeros(
         num_images, device=device, dtype=torch.float32
     )  # (num_images,)
+    k1 = torch.nan + torch.zeros(
+        num_images, device=device, dtype=torch.float32
+    )  # (num_images,)
     xyz = torch.nan + torch.zeros(
         num_points3d, 3, device=device, dtype=torch.float32
     )  # (num_points3d, 3)
@@ -549,9 +552,25 @@ def read_model(
     for i, image_id in enumerate(sorted(images.keys())):
         names.append(images[image_id].name)
         mask[i] = True
-        focal[i] = cameras[images[image_id].camera_id].params[0]
         rotation[i] = torch.from_numpy(qvec2rotmat(images[image_id].qvec)).to(rotation)
         translation[i] = torch.from_numpy(images[image_id].tvec).to(translation)
+
+    # fill the camera data
+    for i, image_id in enumerate(sorted(images.keys())):
+        if cameras[images[image_id].camera_id].model == "SIMPLE_PINHOLE":
+            focal[i] = cameras[images[image_id].camera_id].params[0]
+        elif cameras[images[image_id].camera_id].model == "PINHOLE":
+            focal[i] = (
+                cameras[images[image_id].camera_id].params[0]
+                + cameras[images[image_id].camera_id].params[1]
+            ) / 2.0
+        elif cameras[images[image_id].camera_id].model == "SIMPLE_RADIAL":
+            focal[i] = cameras[images[image_id].camera_id].params[0]
+            k1[i] = cameras[images[image_id].camera_id].params[-1]
+        else:
+            raise ValueError(
+                f"Unsupported camera model: {cameras[images[image_id].camera_id].model}"
+            )
 
     # fill the 3D points data
     for i, point3D_id in enumerate(sorted(points3D.keys())):
@@ -574,6 +593,7 @@ def read_model(
         rotation=rotation,
         translation=translation,
         focal=focal,
+        k1=k1,
         points3d=xyz,
         rgb=rgb,
     )
@@ -611,7 +631,7 @@ def write_model(
         # camera_id is 1-based
         camera_id = i + 1
 
-        # only support this model
+        # always write in this model (even for pinhole cameras, where k1 is 0)
         model_name = "SIMPLE_RADIAL"
 
         # get width and height (make sure images with the same camera indeed have the same size)

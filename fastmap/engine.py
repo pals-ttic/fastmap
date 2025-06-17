@@ -5,7 +5,7 @@ from dataclasses import asdict
 import yaml
 
 from fastmap.config import Config
-from fastmap.io import write_model
+from fastmap.io import read_model, write_model
 from fastmap.timer import timer
 from fastmap.container import ImagePairs, Tracks, PointPairs, Points3D
 from fastmap.database import read_database
@@ -34,6 +34,7 @@ def engine(
     headless: bool = False,
     calibrated: bool = False,
     image_dir: str | None = None,
+    gt_model_path: str | None = None,
 ):
     # start timer
     timer.start()
@@ -65,6 +66,15 @@ def engine(
         with open(os.path.join(output_dir, "config.yaml"), "w") as f:
             f.write(config_yaml)
     del config_yaml
+
+    # load gt model if provided
+    if gt_model_path is not None:
+        gt_model = read_model(
+            model_path=gt_model_path,
+            device=device,
+        )
+    else:
+        gt_model = None
 
     # read colmap database
     with timer("Read COLMAP Database"):
@@ -159,6 +169,11 @@ def engine(
         k1 = torch.zeros_like(cameras.focal)
     cameras.k1 = k1
 
+    # log debugging info for initial cameras
+    if gt_model is not None:
+        # TODO: implement logging of initial camera error
+        pass
+
     # estimate relative pose (4 solutions)
     with timer("Relative Pose Decomposition"):
         image_pairs: ImagePairs = decompose(
@@ -180,6 +195,11 @@ def engine(
             log_interval=cfg.rotation.log_interval,
         )
     del image_pairs  # prevent misuse
+
+    # log debugging info for global rotation
+    if gt_model is not None:
+        # TODO: implement logging of rotation error
+        pass
 
     # build tracks container and extract point pairs
     with timer("Build Tracks"):
@@ -235,6 +255,11 @@ def engine(
             log_interval=cfg.global_translation.log_interval,
         )  # (num_images, 3)
 
+    # log debugging info for global translation
+    if gt_model is not None:
+        # TODO: implement logging of translation error
+        pass
+
     # global epipolar optimization
     with timer("Global Epipolar Optimization"):
         R_w2c, t_w2c, focal_scale, point_pair_mask = epipolar_adjustment(
@@ -253,8 +278,18 @@ def engine(
             log_interval=cfg.epipolar_adjustment.log_interval,
         )  # (num_images, 3), (num_images, 3), (num_cameras,), (num_point_pairs,)
 
+    # log debugging info for final poses
+    if gt_model is not None:
+        # TODO: implement logging of final pose error
+        pass
+
     # update cameras with focal scale
     cameras.focal *= focal_scale
+
+    # log debugging info for final cameras
+    if gt_model is not None:
+        # TODO: implement logging of final camera error
+        pass
 
     # wait for the color reader to finish
     if color_reader is not None:
