@@ -2,7 +2,7 @@ from loguru import logger
 import prettytable
 import torch
 
-from fastmap.container import ColmapModel, Images
+from fastmap.container import ColmapModel, Images, Cameras
 from fastmap.utils import quantile_of_big_tensor
 
 
@@ -553,6 +553,86 @@ def log_pairwise_angle_error(
         t_v = t_values[q]
         table.add_row([q, f"{R_v:.2f}", f"{t_v:.2f}"])
     table.add_row(["max", f"{R_values['max']:.2f}", f"{t_values['max']:.2f}"])
+    log_str += f"{table}\n"
+
+    # log the string
+    logger.debug(log_str)
+
+
+def log_intrinsics(
+    images: Images,
+    cameras: Cameras,
+    gt_model: ColmapModel,
+):
+    """Log and compare the estimated intrinsics (focal and distortion) with those of the ground truth model.
+    Args:
+        images: Images container
+        cameras: Cameras container
+        gt_model: ColmapModel container, ground truth model
+    """
+    # init the log string
+    log_str = "\nLogging intrinsics for debugging:\n"
+
+    # get the set of gt image names
+    gt_image_names = set(gt_model.names)
+
+    # create the dict for storing the intrinsics
+    values = {"focal_pred": [], "focal_gt": [], "k1_pred": [], "k1_gt": []}
+
+    # loop over the cameras
+    for camera_idx in range(cameras.num_cameras):
+        # write the predicted intrinsics
+        values["focal_pred"].append(cameras.focal[camera_idx].item())
+        values["k1_pred"].append(cameras.k1[camera_idx].item())
+
+        # get the set of image names for this camera that are also in the ground truth model
+        names = set(
+            [
+                name
+                for i, name in enumerate(images.names)
+                if cameras.camera_idx[i] == camera_idx and name in gt_image_names
+            ]
+        )
+
+        # get the mask for the images that are in the ground truth model
+        mask = torch.tensor(
+            [name in names for name in gt_model.names],
+            dtype=torch.bool,
+            device=images.device,
+        )  # (num_gt_images,)
+
+        # write the ground truth intrinsics by averaging over the images
+        if len(names) > 0:
+            values["focal_gt"].append(gt_model.focal[mask].mean().item())
+            values["k1_gt"].append(gt_model.k1[mask].mean().item())
+        else:
+            # if no images are found, write NaN
+            values["focal_gt"].append(float("nan"))
+            values["k1_gt"].append(float("nan"))
+
+    # make the table
+    table = prettytable.PrettyTable()
+    table.field_names = [
+        "Camera Idx",
+        "Focal (Pred)",
+        "Focal (GT Avg)",
+        "k1 (Pred)",
+        "k1 (GT Avg)",
+    ]
+    for camera_idx, (focal_pred, focal_gt, k1_pred, k1_gt) in enumerate(
+        zip(
+            values["focal_pred"], values["focal_gt"], values["k1_pred"], values["k1_gt"]
+        )
+    ):
+        table.add_row(
+            [
+                camera_idx,
+                f"{focal_pred:.2f}",
+                f"{focal_gt:.2f}",
+                f"{k1_pred:.5f}",
+                f"{k1_gt:.5f}",
+            ]
+        )
     log_str += f"{table}\n"
 
     # log the string

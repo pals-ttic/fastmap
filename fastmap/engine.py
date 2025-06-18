@@ -26,6 +26,7 @@ from fastmap.debug import (
     log_pairwise_rotation_angle_error,
     log_pairwise_translation_angle_error,
     log_pairwise_angle_error,
+    log_intrinsics,
 )
 
 
@@ -179,8 +180,11 @@ def engine(
 
     # log debugging info for initial cameras
     if gt_model is not None:
-        # TODO: implement logging of initial camera error
-        pass
+        log_intrinsics(
+            images=images,
+            cameras=cameras,
+            gt_model=gt_model,
+        )
 
     # estimate relative pose (4 solutions)
     with timer("Relative Pose Decomposition"):
@@ -304,8 +308,11 @@ def engine(
 
     # log debugging info for final cameras
     if gt_model is not None:
-        # TODO: implement logging of final camera error
-        pass
+        log_intrinsics(
+            images=images,
+            cameras=cameras,
+            gt_model=gt_model,
+        )
 
     # wait for the color reader to finish
     if color_reader is not None:
