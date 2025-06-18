@@ -33,8 +33,6 @@ class ColmapModel:
 
     # List[str], filenames of images
     names: List[str]
-    # torch.Tensor, bool, shape=(num_image_pairs,), a mask of images, True if the image is in this model
-    mask: torch.Tensor
     # torch.Tensor, float, shape=(num_images, 3, 3), global rotation of w2c
     rotation: torch.Tensor
     # torch.Tensor, float, shape=(num_images, 3), global translation of w2c

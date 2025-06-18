@@ -527,8 +527,7 @@ def read_model(
     # allocate the memory
     num_images = len(images)
     num_points3d = len(points3D)
-    names = []
-    mask = torch.zeros(num_images, dtype=torch.bool, device=device)  # (num_images,)
+    names = [""] * num_images  # List (num_images,)
     rotation = torch.nan + torch.zeros(
         num_images, 3, 3, device=device, dtype=torch.float32
     )  # (num_images, 3, 3)
@@ -550,8 +549,7 @@ def read_model(
 
     # fill the pose data
     for i, image_id in enumerate(sorted(images.keys())):
-        names.append(images[image_id].name)
-        mask[i] = True
+        names[i] = images[image_id].name
         rotation[i] = torch.from_numpy(qvec2rotmat(images[image_id].qvec)).to(rotation)
         translation[i] = torch.from_numpy(images[image_id].tvec).to(translation)
 
@@ -589,7 +587,6 @@ def read_model(
 
     model = ColmapModel(
         names=names,
-        mask=mask,
         rotation=rotation,
         translation=translation,
         focal=focal,

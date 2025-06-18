@@ -22,6 +22,7 @@ from fastmap.color import TrackColor2DReader
 from fastmap.point_pair import point_pairs_from_tracks
 from fastmap.epipolar import epipolar_adjustment
 from fastmap.sparse import sparse_reconstruction
+from fastmap.debug import log_pairwise_rotation_angle_error
 
 
 @torch.no_grad()
@@ -198,8 +199,11 @@ def engine(
 
     # log debugging info for global rotation
     if gt_model is not None:
-        # TODO: implement logging of rotation error
-        pass
+        log_pairwise_rotation_angle_error(
+            R_w2c_pred=R_w2c,
+            images=images,
+            gt_model=gt_model,
+        )
 
     # build tracks container and extract point pairs
     with timer("Build Tracks"):
