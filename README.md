@@ -83,6 +83,9 @@ python -m fastmap.vis /your/output/directory/sparse/0 --viewer_options point_siz
 ```
 Please see `fastmap/vis.py` for a complete set of supported options.
 
+### Debugging
+If FastMap fails on a database but other methods such as COLMAP succeed, you can use the `--gt_model` option to provide a good model to `run.py`. Some information potentially useful for debugging (such as comparison of intrinsics, errors of relative rotation and translation, etc) will be printed.
+
 ## Data and Reproduction
 Images, pre-computed databases and ground truths to reproduce our benchmarks are hosted [here](https://huggingface.co/datasets/whc/fastmap_sfm). Download a subset to start playing with FastMap. 
 
