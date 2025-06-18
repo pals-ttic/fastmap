@@ -70,10 +70,13 @@ def engine(
 
     # load gt model if provided
     if gt_model_path is not None:
+        if not os.path.exists(gt_model_path):
+            raise FileNotFoundError(f"GT model path {gt_model_path} does not exist")
         gt_model = read_model(
             model_path=gt_model_path,
             device=device,
         )
+        logger.info(f"Loaded GT model for debugging from {gt_model_path}")
     else:
         gt_model = None
 

@@ -143,7 +143,7 @@ def log_pairwise_rotation_angle_error(
     )
     if len(valid_image_names) == 0:
         raise ValueError(
-            "No valid images found in the intersection of ground truth and images. Are you sure you provided the correct GT model?"
+            "No valid images found in the intersection of ground truth and images. Are you sure the provided GT model was run on the same database?"
         )
 
     # log the number of valid and ground truth images
