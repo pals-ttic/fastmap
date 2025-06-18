@@ -76,7 +76,7 @@ def engine(
             model_path=gt_model_path,
             device=device,
         )
-        logger.info(f"Loaded GT model for debugging from {gt_model_path}")
+        logger.debug(f"Loaded GT model for debugging from {gt_model_path}")
     else:
         gt_model = None
 
