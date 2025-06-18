@@ -96,7 +96,7 @@ def pairwise_rotation_angle_error(
 
             # trace(A.T @ B)  =  (A * B).sum(-1).sum(-1)
             cos_theta = ((R_rel1 * R_rel2).sum(dim=(-1, -2)) - 1.0) * 0.5
-            cos_theta.clamp_(min=-0.99999, max=0.99999)  # numerical safety
+            cos_theta.clamp_(min=-1.0, max=1.0)  # numerical safety
 
             theta_deg = torch.rad2deg(torch.acos(cos_theta))  # (Bi, Bj)
 
@@ -434,6 +434,125 @@ def log_pairwise_translation_angle_error(
         v = values[q]
         table.add_row([q, f"{v:.2f}"])
     table.add_row(["max", f"{values['max']:.2f}"])
+    log_str += f"{table}\n"
+
+    # log the string
+    logger.debug(log_str)
+
+
+def log_pairwise_angle_error(
+    R_w2c_pred: torch.Tensor,
+    t_w2c_pred: torch.Tensor,
+    images: Images,
+    gt_model: ColmapModel,
+    quantiles: list = [0.2, 0.5, 0.6, 0.7, 0.8, 0.9, 0.92, 0.95, 0.97, 0.99],
+):
+    """Compute and log both the pairwise relative rotation and translation angle error between two sets of global world-to-camera poses.
+    Args:
+        R_w2c_pred: torch.Tensor float (num_images, 3, 3), predicted global world-to-camera rotation matrices.
+        t_w2c_pred: torch.Tensor float (num_images, 3), predicted global world-to-camera translation vectors.
+        images: Images container
+        gt_model: ColmapModel container, ground truth model
+        quantiles: list of quantiles to compute in addition to min and max values.
+    """
+    # init the log string
+    log_str = "\nLogging pairwise rotation and translation angle error for debugging:\n"
+
+    # get info
+    device = R_w2c_pred.device
+
+    # make sure the shapes are correct
+    num_images = R_w2c_pred.shape[0]
+    assert R_w2c_pred.shape == (num_images, 3, 3)
+    log_str += f"Total number of images: {num_images}\n"
+
+    # get the ground truth poses
+    R_w2c_gt = gt_model.rotation  # (num_gt_images, 3, 3)
+    t_w2c_gt = gt_model.translation  # (num_gt_images, 3)
+
+    # get the set of valid image names
+    valid_image_names = set(gt_model.names) & set(
+        [name for i, name in enumerate(images.names) if images.mask[i]]
+    )
+    if len(valid_image_names) == 0:
+        raise ValueError(
+            "No valid images found in the intersection of ground truth and images. Are you sure the provided GT model was run on the same database?"
+        )
+
+    # log the number of valid and ground truth images
+    log_str += f"Number of valid images: {images.mask.long().sum().item()}\n"
+    log_str += f"Number of ground truth images: {len(gt_model.names)}\n"
+
+    # make valid mask for the predicted rotations
+    mask_pred = torch.tensor(
+        [name in valid_image_names for name in images.names],
+        dtype=torch.bool,
+        device=device,
+    )  # (num_images,)
+
+    # make valid mask for the ground truth rotations
+    mask_gt = torch.tensor(
+        [name in valid_image_names for name in gt_model.names],
+        dtype=torch.bool,
+        device=device,
+    )  # (num_images,)
+
+    # log the number of images used for the error computation
+    assert len(valid_image_names) == mask_pred.long().sum() == mask_gt.long().sum()
+    log_str += f"Using {mask_pred.long().sum().item()} images for error computation (intersection of valid images and gt images)\n"
+
+    # compute the pairwise rotation angle error and drop the diagonal values
+    R_errors = pairwise_rotation_angle_error(
+        R_w2c1=R_w2c_pred[mask_pred], R_w2c2=R_w2c_gt[mask_gt]
+    )  # (num_valid_images, num_valid_images)
+    R_errors = R_errors[
+        ~torch.eye(R_errors.shape[0], dtype=torch.bool, device=R_errors.device)
+    ]  # (num_off_diagonal_pairs,)
+
+    # compute the quantiles of the rotation errors
+    R_values = {
+        f"q{int(q * 100)}": quantile_of_big_tensor(R_errors, q).item()
+        for q in quantiles
+    }
+    R_values["min"] = R_errors.min().item()
+    R_values["max"] = R_errors.max().item()
+
+    # compute the pairwise translation angle error and drop the diagonal values
+    t_errors = pairwise_translation_angle_error(
+        R_w2c1=R_w2c_pred[mask_pred],
+        R_w2c2=R_w2c_gt[mask_gt],
+        t_w2c1=t_w2c_pred[mask_pred],
+        t_w2c2=t_w2c_gt[mask_gt],
+    )  # (num_valid_images, num_valid_images)
+    t_errors = t_errors[
+        ~torch.eye(t_errors.shape[0], dtype=torch.bool, device=t_errors.device)
+    ]  # (num_off_diagonal_pairs,)
+    del mask_pred, mask_gt
+
+    # compute the quantiles of the translation errors
+    t_values = {
+        f"q{int(q * 100)}": quantile_of_big_tensor(t_errors, q).item()
+        for q in quantiles
+    }
+    t_values["min"] = t_errors.min().item()
+    t_values["max"] = t_errors.max().item()
+
+    # make the table
+    table = prettytable.PrettyTable()
+    table.field_names = [
+        "Quantile",
+        "Rotation Error (degrees)",
+        "Translation Error (degrees)",
+    ]
+    table.add_row(["min", f"{R_values['min']:.2f}", f"{t_values['min']:.2f}"])
+    assert tuple(sorted(R_values.keys())) == tuple(sorted(t_values.keys()))
+    for q in sorted(R_values.keys()):
+        if q == "min" or q == "max":
+            continue
+        R_v = R_values[q]
+        t_v = t_values[q]
+        table.add_row([q, f"{R_v:.2f}", f"{t_v:.2f}"])
+    table.add_row(["max", f"{R_values['max']:.2f}", f"{t_values['max']:.2f}"])
     log_str += f"{table}\n"
 
     # log the string

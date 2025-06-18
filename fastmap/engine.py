@@ -25,6 +25,7 @@ from fastmap.sparse import sparse_reconstruction
 from fastmap.debug import (
     log_pairwise_rotation_angle_error,
     log_pairwise_translation_angle_error,
+    log_pairwise_angle_error,
 )
 
 
@@ -291,8 +292,12 @@ def engine(
 
     # log debugging info for final poses
     if gt_model is not None:
-        # TODO: implement logging of final pose error
-        pass
+        log_pairwise_angle_error(
+            R_w2c_pred=R_w2c,
+            t_w2c_pred=t_w2c,
+            images=images,
+            gt_model=gt_model,
+        )
 
     # update cameras with focal scale
     cameras.focal *= focal_scale
