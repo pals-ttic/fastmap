@@ -19,6 +19,7 @@ def run(args):
         headless=args.headless,
         calibrated=args.calibrated,
         image_dir=args.image_dir,
+        gt_model_path=args.gt_model,
     )
 
 
@@ -52,6 +53,12 @@ if __name__ == "__main__":
         "--calibrated",
         action="store_true",
         help="Use the focal length and principal point from the database.",
+    )
+    parser.add_argument(
+        "--gt_model",
+        type=str,
+        default=None,
+        help="Path to ground truth model (e.g. otuput of colmap) for debugging purposes.",
     )
     args = parser.parse_args()
 

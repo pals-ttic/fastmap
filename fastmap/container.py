@@ -33,14 +33,14 @@ class ColmapModel:
 
     # List[str], filenames of images
     names: List[str]
-    # torch.Tensor, bool, shape=(num_image_pairs,), a mask of images, True if the image is in this model
-    mask: torch.Tensor
     # torch.Tensor, float, shape=(num_images, 3, 3), global rotation of w2c
     rotation: torch.Tensor
     # torch.Tensor, float, shape=(num_images, 3), global translation of w2c
     translation: torch.Tensor
     # torch.Tensor, float, shape=(num_images,), focal lengths in pixels
     focal: torch.Tensor
+    # torch.Tensor, float, shape=(num_images,), k1 radial distortion coefficient (nan if pinhole)
+    k1: torch.Tensor
     # None | torch.Tensor, float, shape=(num_points3d, 3), 3D coordinates of scene points
     points3d: None | torch.Tensor
     # None | torch.Tensor, uint8, shape=(num_points3d, 3), RGB color of scene points in [0, 255]

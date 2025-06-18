@@ -5,7 +5,7 @@ from dataclasses import asdict
 import yaml
 
 from fastmap.config import Config
-from fastmap.io import write_model
+from fastmap.io import read_model, write_model
 from fastmap.timer import timer
 from fastmap.container import ImagePairs, Tracks, PointPairs, Points3D
 from fastmap.database import read_database
@@ -22,6 +22,12 @@ from fastmap.color import TrackColor2DReader
 from fastmap.point_pair import point_pairs_from_tracks
 from fastmap.epipolar import epipolar_adjustment
 from fastmap.sparse import sparse_reconstruction
+from fastmap.debug import (
+    log_pairwise_rotation_angle_error,
+    log_pairwise_translation_angle_error,
+    log_pairwise_angle_error,
+    log_intrinsics,
+)
 
 
 @torch.no_grad()
@@ -34,6 +40,7 @@ def engine(
     headless: bool = False,
     calibrated: bool = False,
     image_dir: str | None = None,
+    gt_model_path: str | None = None,
 ):
     # start timer
     timer.start()
@@ -65,6 +72,18 @@ def engine(
         with open(os.path.join(output_dir, "config.yaml"), "w") as f:
             f.write(config_yaml)
     del config_yaml
+
+    # load gt model if provided
+    if gt_model_path is not None:
+        if not os.path.exists(gt_model_path):
+            raise FileNotFoundError(f"GT model path {gt_model_path} does not exist")
+        gt_model = read_model(
+            model_path=gt_model_path,
+            device=device,
+        )
+        logger.debug(f"Loaded GT model for debugging from {gt_model_path}")
+    else:
+        gt_model = None
 
     # read colmap database
     with timer("Read COLMAP Database"):
@@ -159,6 +178,14 @@ def engine(
         k1 = torch.zeros_like(cameras.focal)
     cameras.k1 = k1
 
+    # log debugging info for initial cameras
+    if gt_model is not None:
+        log_intrinsics(
+            images=images,
+            cameras=cameras,
+            gt_model=gt_model,
+        )
+
     # estimate relative pose (4 solutions)
     with timer("Relative Pose Decomposition"):
         image_pairs: ImagePairs = decompose(
@@ -180,6 +207,14 @@ def engine(
             log_interval=cfg.rotation.log_interval,
         )
     del image_pairs  # prevent misuse
+
+    # log debugging info for global rotation
+    if gt_model is not None:
+        log_pairwise_rotation_angle_error(
+            R_w2c_pred=R_w2c,
+            images=images,
+            gt_model=gt_model,
+        )
 
     # build tracks container and extract point pairs
     with timer("Build Tracks"):
@@ -235,6 +270,12 @@ def engine(
             log_interval=cfg.global_translation.log_interval,
         )  # (num_images, 3)
 
+    # log debugging info for global translation
+    if gt_model is not None:
+        log_pairwise_translation_angle_error(
+            R_w2c_pred=R_w2c, t_w2c_pred=t_w2c, images=images, gt_model=gt_model
+        )
+
     # global epipolar optimization
     with timer("Global Epipolar Optimization"):
         R_w2c, t_w2c, focal_scale, point_pair_mask = epipolar_adjustment(
@@ -253,8 +294,25 @@ def engine(
             log_interval=cfg.epipolar_adjustment.log_interval,
         )  # (num_images, 3), (num_images, 3), (num_cameras,), (num_point_pairs,)
 
+    # log debugging info for final poses
+    if gt_model is not None:
+        log_pairwise_angle_error(
+            R_w2c_pred=R_w2c,
+            t_w2c_pred=t_w2c,
+            images=images,
+            gt_model=gt_model,
+        )
+
     # update cameras with focal scale
     cameras.focal *= focal_scale
+
+    # log debugging info for final cameras
+    if gt_model is not None:
+        log_intrinsics(
+            images=images,
+            cameras=cameras,
+            gt_model=gt_model,
+        )
 
     # wait for the color reader to finish
     if color_reader is not None:

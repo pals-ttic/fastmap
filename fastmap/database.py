@@ -619,7 +619,8 @@ def read_database(
 
     # define supported camera model types (the values are the same as in colmap)
     class CAMERA_MODEL_TYPE(Enum):
-        SIMPLE_PINHOLE = 1
+        SIMPLE_PINHOLE = 0
+        PINHOLE = 1
         SIMPLE_RADIAL = 2
 
     # separate the camera parameters
@@ -642,6 +643,11 @@ def read_database(
     for i in range(num_colmap_cameras):
         cam = colmap_cameras[i]
         if cam["model_type"] == CAMERA_MODEL_TYPE.SIMPLE_PINHOLE.value:
+            colmap_cameras_focal[i] = cam["camera_params"][0]
+            colmap_cameras_cx[i] = cam["camera_params"][1]
+            colmap_cameras_cy[i] = cam["camera_params"][2]
+            colmap_cameras_k1[i] = 0.0
+        elif cam["model_type"] == CAMERA_MODEL_TYPE.PINHOLE.value:
             colmap_cameras_focal[i] = (
                 cam["camera_params"][0] + cam["camera_params"][1]
             ) / 2.0
