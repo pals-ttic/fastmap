@@ -22,7 +22,10 @@ from fastmap.color import TrackColor2DReader
 from fastmap.point_pair import point_pairs_from_tracks
 from fastmap.epipolar import epipolar_adjustment
 from fastmap.sparse import sparse_reconstruction
-from fastmap.debug import log_pairwise_rotation_angle_error
+from fastmap.debug import (
+    log_pairwise_rotation_angle_error,
+    log_pairwise_translation_angle_error,
+)
 
 
 @torch.no_grad()
@@ -264,8 +267,9 @@ def engine(
 
     # log debugging info for global translation
     if gt_model is not None:
-        # TODO: implement logging of translation error
-        pass
+        log_pairwise_translation_angle_error(
+            R_w2c_pred=R_w2c, t_w2c_pred=t_w2c, images=images, gt_model=gt_model
+        )
 
     # global epipolar optimization
     with timer("Global Epipolar Optimization"):
