@@ -97,6 +97,66 @@ def rotation_6d_to_matrix(rot6d):
     return R
 
 
+def axis_angle_to_rotation_matrix(axis_angles: torch.Tensor) -> torch.Tensor:
+    """
+    Convert a batch of axis-angle vectors to rotation matrices using Rodrigues' rotation formula.
+
+    Each axis-angle vector defines a 3D rotation:
+        - The direction of the vector is the axis of rotation.
+        - The norm of the vector is the rotation angle (in radians).
+
+    Args:
+        axis_angles (Tensor): Tensor of shape (B, 3) containing axis-angle vectors.
+
+    Returns:
+        Tensor: Tensor of shape (B, 3, 3) containing corresponding rotation matrices.
+
+    Notes:
+        - The conversion is differentiable.
+        - For small angles, stability is maintained using a small epsilon.
+    """
+    assert (
+        axis_angles.ndim == 2 and axis_angles.shape[1] == 3
+    ), "Input must be of shape (B, 3)"
+
+    B = axis_angles.shape[0]
+    eps = 1e-8
+
+    # Compute the angle (magnitude) of each axis-angle vector: (B, 1)
+    angles = torch.norm(axis_angles, dim=1, keepdim=True)  # shape (B, 1)
+
+    # Normalize to get unit vectors: (B, 3)
+    axes = axis_angles / (angles + eps)
+
+    # Compute sine and cosine of the angles
+    sin = torch.sin(angles).view(-1, 1, 1)  # (B, 1, 1)
+    cos = torch.cos(angles).view(-1, 1, 1)  # (B, 1, 1)
+    one_minus_cos = 1.0 - cos
+
+    # Extract x, y, z components
+    x, y, z = axes[:, 0], axes[:, 1], axes[:, 2]  # Each (B,)
+
+    # Construct skew-symmetric matrices for each axis: (B, 3, 3)
+    K = torch.zeros((B, 3, 3), dtype=axis_angles.dtype, device=axis_angles.device)
+    K[:, 0, 1] = -z
+    K[:, 0, 2] = y
+    K[:, 1, 0] = z
+    K[:, 1, 2] = -x
+    K[:, 2, 0] = -y
+    K[:, 2, 1] = x
+
+    # Outer product u u^T for each normalized axis: (B, 3, 3)
+    axis_outer = axes.unsqueeze(2) @ axes.unsqueeze(1)
+
+    # Identity matrix for each batch: (B, 3, 3)
+    I = torch.eye(3, device=axis_angles.device).expand(B, 3, 3)
+
+    # Rodrigues' rotation formula
+    R = cos * I + sin * K + one_minus_cos * axis_outer
+
+    return R
+
+
 @torch.no_grad()
 def quantile_of_big_tensor(tensor: torch.Tensor, q: float):
     sorted = tensor.flatten().sort().values
