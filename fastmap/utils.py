@@ -157,6 +157,60 @@ def axis_angle_to_rotation_matrix(axis_angles: torch.Tensor) -> torch.Tensor:
     return R
 
 
+def cartesian_to_spherical(xyz: torch.Tensor) -> torch.Tensor:
+    """
+    Convert Cartesian coordinates (x, y, z) to spherical coordinates (r, theta, phi).
+
+    Args:
+        xyz (Tensor): Tensor of shape (B, 3) representing B points in Cartesian coordinates.
+
+    Returns:
+        Tensor: Tensor of shape (B, 3) where each row contains:
+            - r: radius (distance from origin)
+            - theta: inclination angle ∈ [0, π], from +z axis
+            - phi: azimuth angle ∈ [-π, π], from +x axis in x-y plane
+
+    Notes:
+        - The conversion is differentiable.
+        - For points on the z-axis, azimuth phi is defined to be 0.
+    """
+    assert xyz.ndim == 2 and xyz.shape[1] == 3, "Input must be of shape (B, 3)"
+
+    x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+    r = torch.norm(xyz, dim=1)  # (B,)
+    theta = torch.acos(torch.clamp(z / (r + 1e-8), -1.0, 1.0))  # (B,)
+    phi = torch.atan2(y, x)  # (B,)
+
+    spherical = torch.stack((r, theta, phi), dim=1)  # (B, 3)
+    return spherical
+
+
+def spherical_to_cartesian(sph: torch.Tensor) -> torch.Tensor:
+    """
+    Convert spherical coordinates (r, theta, phi) to Cartesian coordinates (x, y, z).
+
+    Args:
+        sph (Tensor): Tensor of shape (B, 3) where each row contains:
+            - r: radius
+            - theta: inclination angle ∈ [0, π]
+            - phi: azimuth angle ∈ [-π, π]
+
+    Returns:
+        Tensor: Tensor of shape (B, 3) representing Cartesian coordinates (x, y, z).
+    """
+    assert sph.ndim == 2 and sph.shape[1] == 3, "Input must be of shape (B, 3)"
+
+    r, theta, phi = sph[:, 0], sph[:, 1], sph[:, 2]
+
+    sin_theta = torch.sin(theta)
+    x = r * sin_theta * torch.cos(phi)
+    y = r * sin_theta * torch.sin(phi)
+    z = r * torch.cos(theta)
+
+    cartesian = torch.stack((x, y, z), dim=1)  # (B, 3)
+    return cartesian
+
+
 @torch.no_grad()
 def quantile_of_big_tensor(tensor: torch.Tensor, q: float):
     sorted = tensor.flatten().sort().values
