@@ -32,6 +32,9 @@ class EpipolarAdjustmentParameters(nn.Module):
         ###### Get some information #####
         num_images = R_w2c.shape[0]
         device = R_w2c.device
+        R_w2c = R_w2c.clone().to(precision)  # (num_images, 3, 3)
+        t_w2c = t_w2c.clone().to(precision)  # (num_images, 3)
+        focal_scale = focal_scale.clone().to(precision)  # (num_cameras,)
 
         ###### Rotation parameters #####
         # initialize all parameters to (1.0, 0.0, 0.0)
@@ -49,9 +52,7 @@ class EpipolarAdjustmentParameters(nn.Module):
         ).detach()  # (num_images, 3, 3)
 
         ###### Translation parameters #####
-        self.t_w2c = nn.Parameter(
-            t_w2c.clone().to(precision), requires_grad=True
-        )  # (num_images, 3)
+        self.t_w2c = nn.Parameter(t_w2c, requires_grad=True)  # (num_images, 3)
 
         ###### Focal length parameters #####
         self.focal_scale = nn.Parameter(
@@ -440,6 +441,7 @@ def loop(
         t_w2c: torch.Tensor float (num_images, 3), w2c global translation
         focal_scale: torch.Tensor float (num_cameras,), the optimized scale factor on focal lengths.
     """
+    precision = torch.float64  # debug: always use float64 for accumulation
     ##### Get some information #####
     device = R_w2c.device
     num_point_pairs = point_pair_mask.shape[0]
@@ -532,8 +534,8 @@ def loop(
 
             ##### Create the L-BFGS optimizer #####
             optimizer = torch.optim.LBFGS(
-                params.parameters(),
-                max_iter=10000,  # debug: use argument
+                [params.axis_angle, params.t_w2c, params.focal_scale],
+                max_iter=200,  # debug: use argument
                 history_size=20,  # debug: use argument
                 tolerance_grad=1e-9,
                 tolerance_change=1e-9,
@@ -547,9 +549,11 @@ def loop(
 
             def lbfgs_closure():
                 # clear previous gradients
+                nonlocal optimizer
                 optimizer.zero_grad()
 
                 # forward the parameters
+                nonlocal params
                 (
                     R_w2c,
                     t_w2c,
@@ -587,6 +591,7 @@ def loop(
                 # update the number of evaluations
                 nonlocal num_lbfgs_evals
                 num_lbfgs_evals += 1
+                print(f"Iteration {num_lbfgs_evals}: loss = {final_loss:.8f}")
 
                 # return the loss
                 return loss
@@ -597,17 +602,19 @@ def loop(
             print(f"Number of L-BFGS evaluations: {num_lbfgs_evals}")
 
             # jiahao debug: re-run with adam to see how it compares
-            if False:
-                adam_optimizer = torch.optim.Adam(
-                    params.parameters(),
+            params = fresh_params  # reset to the fresh parameters
+            if True:
+                optimizer = torch.optim.Adam(
+                    [params.axis_angle, params.t_w2c, params.focal_scale],
                     lr=1e-3,
                 )
                 num_lbfgs_evals = 0
                 print("Adam optimizer started")
-                for _ in range(1000):
-                    adam_optimizer.step(lbfgs_closure)
+                for _ in range(200):
+                    optimizer.step(lbfgs_closure)
                 print(f"Final loss: {final_loss:.8f}")
                 print("Adam optimizer finished")
+            quit()
 
         ##### Update the results #####
         ########
