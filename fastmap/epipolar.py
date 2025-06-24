@@ -62,6 +62,9 @@ class EpipolarAdjustmentParameters(nn.Module):
             "bij,bj->bi", R_w2c.transpose(-1, -2), t_w2c
         ) # (num_images, 3)
 
+        # move first camera to origin
+        camera_centers = camera_centers - camera_centers[:1]  # (num_images, 3)
+
         # convert to spherical coordinates
         spherical_coords = cartesian_to_spherical(camera_centers) # (num_images, 3)
 
