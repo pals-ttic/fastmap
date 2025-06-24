@@ -37,19 +37,22 @@ class EpipolarAdjustmentParameters(nn.Module):
         focal_scale = focal_scale.clone().to(precision)  # (num_cameras,)
 
         ###### Rotation parameters #####
+        # fix first rotation
+        self.fixed_R_w2c = R_w2c[:1].detach()  # (1, 3, 3)
+
         # initialize all parameters to (1.0, 0.0, 0.0)
         self.axis_angle = torch.zeros(
-            num_images, 3, device=device, dtype=precision
-        )  # (num_images, 3)
-        self.axis_angle[:, 0] = 1.0  # (num_images,)
+            num_images - 1, 3, device=device, dtype=precision
+        )  # (num_images-1, 3)
+        self.axis_angle[:, 0] = 1.0  # (num_images-1,)
         self.axis_angle = nn.Parameter(
             self.axis_angle, requires_grad=True
-        )  # (num_images, 3)
+        )  # (num_images-1, 3)
 
         # compute the base rotation matrix
-        self.base_rotation = (
-            axis_angle_to_rotation_matrix(self.axis_angle).transpose(-1, -2) @ R_w2c
-        ).detach()  # (num_images, 3, 3)
+        self.base_R_w2c = (
+            axis_angle_to_rotation_matrix(self.axis_angle).transpose(-1, -2) @ R_w2c[1:]
+        ).detach()  # (num_images-1, 3, 3)
 
         ###### Translation parameters #####
         self.t_w2c = nn.Parameter(t_w2c, requires_grad=True)  # (num_images, 3)
@@ -72,8 +75,9 @@ class EpipolarAdjustmentParameters(nn.Module):
         """Return the parameters after some processing"""
         ###### Get R_w2c #####
         R_w2c = (
-            axis_angle_to_rotation_matrix(self.axis_angle) @ self.base_rotation
-        )  # (num_images, 3, 3)
+            axis_angle_to_rotation_matrix(self.axis_angle) @ self.base_R_w2c
+        )  # (num_images-1, 3, 3)
+        R_w2c = torch.cat([self.fixed_R_w2c, R_w2c], dim=0)  # (num_images, 3, 3)
 
         ###### Get t_w2c #####
         t_w2c = self.t_w2c  # (num_images, 3)
