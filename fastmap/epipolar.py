@@ -571,7 +571,7 @@ def loop(
             ##### Create the L-BFGS optimizer #####
             optimizer = torch.optim.LBFGS(
                 params.parameters(),
-                max_iter=200,  # debug: use argument
+                max_iter=1,  # debug: use argument
                 history_size=20,  # debug: use argument
                 tolerance_grad=1e-9,
                 tolerance_change=1e-9,
@@ -580,16 +580,18 @@ def loop(
 
             ##### Define the L-BFGS closure #####
             # use out-of-scope variables to keep track of L-BFGS info
-            final_loss = 0.0
-            num_lbfgs_evals = 0
+            loss = torch.tensor(torch.inf, device=device, dtype=precision)
 
             def lbfgs_closure():
-                # clear previous gradients
+                # use variables from the outer scope
+                nonlocal params
                 nonlocal optimizer
+                nonlocal loss
+
+                # clear previous gradients
                 optimizer.zero_grad()
 
                 # forward the parameters
-                nonlocal params
                 (
                     R_w2c,
                     t_w2c,
@@ -620,36 +622,48 @@ def loop(
                 # backprop
                 loss.backward()
 
-                # update the final loss
-                nonlocal final_loss
-                final_loss = loss.item()
-
                 # update the number of evaluations
-                nonlocal num_lbfgs_evals
-                num_lbfgs_evals += 1
-                print(f"Iteration {num_lbfgs_evals}: loss = {final_loss:.8f}")
+                # num_lbfgs_evals += 1
+                # print(f"Iteration {num_lbfgs_evals}: loss = {final_loss:.8f}")
 
                 # return the loss
                 return loss
 
             ##### Run the L-BFGS loop #####
-            optimizer.step(lbfgs_closure)
-            print(f"Final loss: {final_loss:.8f}")
-            print(f"Number of L-BFGS evaluations: {num_lbfgs_evals}")
+            min_iter = 20  # debug: use argument
+            min_reduction = 1e-5  # debug: use argument
+            prev_loss = float("inf")
+            iter_idx = 0
+            while iter_idx < min_iter or prev_loss - loss.item() > min_reduction:
+                # update the previous loss
+                prev_loss = loss.item()
+
+                # run the optimizer step
+                optimizer.step(lbfgs_closure)
+
+                # print the progress
+                if iter_idx % 1 == 0:
+                    print(
+                        f"Iteration {iter_idx}: loss = {loss.item():.8f}, "
+                        f"reduction = {prev_loss - loss.item():.8f}"
+                    )
+
+                # increment the iteration index
+                iter_idx += 1
 
             # jiahao debug: re-run with adam to see how it compares
-            params = fresh_params  # reset to the fresh parameters
-            if True:
-                optimizer = torch.optim.Adam(
-                    params.parameters(),
-                    lr=1e-3,
-                )
-                num_lbfgs_evals = 0
-                print("Adam optimizer started")
-                for _ in range(200):
-                    optimizer.step(lbfgs_closure)
-                print(f"Final loss: {final_loss:.8f}")
-                print("Adam optimizer finished")
+            # params = fresh_params  # reset to the fresh parameters
+            # if True:
+            #     optimizer = torch.optim.Adam(
+            #         params.parameters(),
+            #         lr=1e-3,
+            #     )
+            #     num_lbfgs_evals = 0
+            #     print("Adam optimizer started")
+            #     for _ in range(200):
+            #         optimizer.step(lbfgs_closure)
+            #     print(f"Final loss: {final_loss:.8f}")
+            #     print("Adam optimizer finished")
             quit()
 
         ##### Update the results #####
