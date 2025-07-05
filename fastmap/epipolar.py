@@ -60,30 +60,28 @@ class EpipolarAdjustmentParameters(nn.Module):
         # convert to camera centers
         camera_centers = -torch.einsum(
             "bij,bj->bi", R_w2c.transpose(-1, -2), t_w2c
-        ) # (num_images, 3)
+        )  # (num_images, 3)
 
         # move first camera to origin
         camera_centers = camera_centers - camera_centers[:1]  # (num_images, 3)
 
         # convert to spherical coordinates
-        spherical_coords = cartesian_to_spherical(camera_centers) # (num_images, 3)
+        spherical_coords = cartesian_to_spherical(camera_centers)  # (num_images, 3)
 
         # separate the spherical coordinates
-        r, theta, phi = spherical_coords.unbind(-1)  # (num_images,), (num_images,), (num_images,)
+        r, theta, phi = spherical_coords.unbind(
+            -1
+        )  # (num_images,), (num_images,), (num_images,)
 
         # fix the first camera center and the radius of the second camera
         self.fixed_r = r[:2].detach()  # (2,)
-        self.fixed_theta = theta[:1].detach() # (1,)
-        self.fixed_phi = phi[:1].detach() # (1,)
+        self.fixed_theta = theta[:1].detach()  # (1,)
+        self.fixed_phi = phi[:1].detach()  # (1,)
 
         # initialize the translation parameters
-        self.r = nn.Parameter(r[2:], requires_grad=True) # (num_images-2,)
-        self.theta = nn.Parameter(
-            theta[1:], requires_grad=True
-        ) # (num_images-1,)
-        self.phi = nn.Parameter(
-            phi[1:], requires_grad=True
-        ) # (num_images-1,)
+        self.r = nn.Parameter(r[2:], requires_grad=True)  # (num_images-2,)
+        self.theta = nn.Parameter(theta[1:], requires_grad=True)  # (num_images-1,)
+        self.phi = nn.Parameter(phi[1:], requires_grad=True)  # (num_images-1,)
 
         ###### Focal length parameters #####
         self.focal_scale = nn.Parameter(
@@ -108,13 +106,13 @@ class EpipolarAdjustmentParameters(nn.Module):
         R_w2c = torch.cat([self.fixed_R_w2c, R_w2c], dim=0)  # (num_images, 3, 3)
 
         ###### Get t_w2c #####
-        r = torch.cat([self.fixed_r, self.r], dim=0) # (num_images,)
-        theta = torch.cat([self.fixed_theta, self.theta], dim=0) # (num_images,)
-        phi = torch.cat([self.fixed_phi, self.phi], dim=0) # (num_images,)
-        t_c2w = spherical_to_cartesian(torch.stack([r, theta, phi], dim=-1)) # (num_images, 3)
-        t_w2c = -torch.einsum(
-            "bij,bj->bi", R_w2c, t_c2w
-        ) # (num_images, 3)
+        r = torch.cat([self.fixed_r, self.r], dim=0)  # (num_images,)
+        theta = torch.cat([self.fixed_theta, self.theta], dim=0)  # (num_images,)
+        phi = torch.cat([self.fixed_phi, self.phi], dim=0)  # (num_images,)
+        t_c2w = spherical_to_cartesian(
+            torch.stack([r, theta, phi], dim=-1)
+        )  # (num_images, 3)
+        t_w2c = -torch.einsum("bij,bj->bi", R_w2c, t_c2w)  # (num_images, 3)
 
         ###### Get focal_scale #####
         focal_scale = self.focal_scale  # (num_cameras,)
