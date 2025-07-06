@@ -280,7 +280,7 @@ def _get_intersection_idx(
         )
 
     # sort the image idx according to image names
-    pred_sort_idx = np.argsort(images.names).tolist() # List[int] len=num_images
+    pred_sort_idx = np.argsort(images.names).tolist()  # List[int] len=num_images
     gt_sort_idx = np.argsort(gt_model.names).tolist()  # List[int] len=num_gt_images
 
     # drop the images that are not in the intersection
@@ -293,8 +293,12 @@ def _get_intersection_idx(
     assert len(pred_idx) == len(gt_idx)
 
     # convert to torch tensors
-    pred_idx = torch.tensor(pred_idx, dtype=torch.long, device=device)  # (num_images_in_intersection,)
-    gt_idx = torch.tensor(gt_idx, dtype=torch.long, device=device)  # (num_images_in_intersection,)
+    pred_idx = torch.tensor(
+        pred_idx, dtype=torch.long, device=device
+    )  # (num_images_in_intersection,)
+    gt_idx = torch.tensor(
+        gt_idx, dtype=torch.long, device=device
+    )  # (num_images_in_intersection,)
 
     # return
     return pred_idx, gt_idx
@@ -325,7 +329,9 @@ def log_pairwise_rotation_angle_error(
     R_w2c_gt = gt_model.rotation  # (num_gt_images, 3, 3)
 
     # get idx of images in the intersection of current images and ground truth images
-    pred_idx, gt_idx = _get_intersection_idx(images, gt_model) # (num_images_in_intersection,), (num_images_in_intersection,)
+    pred_idx, gt_idx = _get_intersection_idx(
+        images, gt_model
+    )  # (num_images_in_intersection,), (num_images_in_intersection,)
 
     # log the number of valid and ground truth images
     log_str += f"Number of valid images: {images.mask.long().sum().item()}\n"
@@ -393,7 +399,9 @@ def log_pairwise_translation_angle_error(
     t_w2c_gt = gt_model.translation  # (num_gt_images, 3)
 
     # get idx of images in the intersection of current images and ground truth images
-    pred_idx, gt_idx = _get_intersection_idx(images, gt_model) # (num_images_in_intersection,), (num_images_in_intersection,)
+    pred_idx, gt_idx = _get_intersection_idx(
+        images, gt_model
+    )  # (num_images_in_intersection,), (num_images_in_intersection,)
 
     # log the number of valid and ground truth images
     log_str += f"Number of valid images: {images.mask.long().sum().item()}\n"
@@ -464,7 +472,9 @@ def log_pairwise_angle_error(
     t_w2c_gt = gt_model.translation  # (num_gt_images, 3)
 
     # get idx of images in the intersection of current images and ground truth images
-    pred_idx, gt_idx = _get_intersection_idx(images, gt_model) # (num_images_in_intersection,), (num_images_in_intersection,)
+    pred_idx, gt_idx = _get_intersection_idx(
+        images, gt_model
+    )  # (num_images_in_intersection,), (num_images_in_intersection,)
 
     # log the number of valid and ground truth images
     log_str += f"Number of valid images: {images.mask.long().sum().item()}\n"

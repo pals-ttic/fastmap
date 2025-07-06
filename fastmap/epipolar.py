@@ -447,6 +447,139 @@ def _all_error(
     return error
 
 
+class Closure:
+    def __init__(
+        self,
+        params: EpipolarAdjustmentParameters,
+        optimizer: torch.optim.Optimizer,
+        R_w2c: torch.Tensor,
+        t_w2c: torch.Tensor,
+        focal_scale: torch.Tensor,
+        point_pairs: PointPairs,
+        point_pair_mask: torch.Tensor,
+        camera_idx: torch.Tensor,
+        precision: torch.dtype,
+    ):
+        """Global epipolar adjustment loop.
+
+        Args:
+            params: EpipolarAdjustmentParameters, the parameters for the epipolar adjustment
+            optimizer: torch.optim.Optimizer, the optimizer for the parameters
+            R_w2c: torch.Tensor float (num_images, 3, 3), w2c global rotation matrices for each image
+            t_w2c: torch.Tensor float (num_images, 3), w2c global translation vectors for each image
+            focal_scale: torch.Tensor float (num_cameras,), the scale factor on focal lengths
+            point_pairs: PointPairs container
+            point_pair_mask: torch.Tensor bool (num_point_pairs,), the mask indicating the inlier point pairs
+            camera_idx: torch.Tensor long (num_images,), the camera idx for each image
+            precision: torch.dtype, the precision for the optimization.
+        """
+        ##### Store some attributes #####
+        self.params = params
+        self.optimizer = optimizer
+        self.camera_idx = camera_idx
+        self.device = R_w2c.device
+        self.precision = precision
+
+        ##### Things to monitor #####
+        self._loss = torch.tensor(torch.inf, device=self.device, dtype=self.precision)
+
+        ##### Get image pairs with non-empty inliers #####
+        # get point pair idx
+        unique_image_idx, _inverse_idx = torch.unique(
+            torch.stack(
+                [
+                    point_pairs.image_idx[point_pairs.point_idx1][point_pair_mask],
+                    point_pairs.image_idx[point_pairs.point_idx2][point_pair_mask],
+                ],
+                dim=-1,
+            ),
+            dim=0,
+            return_inverse=True,
+        )  # (num_image_pairs, 2), (num_valid_point_pairs,)
+        image_idx1, image_idx2 = unique_image_idx.unbind(
+            -1
+        )  # (num_image_pairs,), (num_image_pairs,)
+        image_pair_idx = 209347298473 + torch.zeros(
+            point_pairs.num_point_pairs, device=point_pairs.device, dtype=torch.long
+        )  # (num_point_pairs,) use a large number to indicate invalid
+        image_pair_idx[point_pair_mask] = _inverse_idx  # (num_point_pairs,)
+        del unique_image_idx, _inverse_idx
+        self.image_idx1 = image_idx1  # (num_image_pairs,)
+        self.image_idx2 = image_idx2  # (num_image_pairs,)
+
+        # get number of image pairs
+        num_image_pairs = image_idx1.shape[0]
+        self.num_image_pairs = num_image_pairs
+
+        ##### Compute the quadratic form #####
+        # compute the current fundamental matrix
+        current_fundamental = _compute_fundamental_matrix(
+            image_idx1=image_idx1,
+            image_idx2=image_idx2,
+            R_w2c=R_w2c,
+            t_w2c=t_w2c,
+            focal_scale=focal_scale,
+            camera_idx=camera_idx,
+        )  # (num_image_pairs, 3, 3)
+
+        # compute the weighted quadratic form
+        self.W, self.weights = quadratic_form(
+            num_image_pairs=num_image_pairs,
+            point_pairs=point_pairs,
+            image_pair_idx=image_pair_idx,
+            prev_fundamental=current_fundamental,
+            point_pair_mask=point_pair_mask,
+            precision=precision,
+        )  # (num_image_pairs, 9, 9)
+
+        # prevent misuse
+        del current_fundamental
+
+    @property
+    def loss(self):
+        return self._loss
+
+    def __call__(self):
+        # clear previous gradients
+        self.optimizer.zero_grad()
+
+        # forward the parameters
+        (
+            R_w2c,
+            t_w2c,
+            focal_scale,
+        ) = self.params()  # (num_images, 3, 3), (num_images, 3), (num_cameras,)
+
+        # compute the fundamental matrix
+        fundamental = _compute_fundamental_matrix(
+            image_idx1=self.image_idx1,
+            image_idx2=self.image_idx2,
+            R_w2c=R_w2c,
+            t_w2c=t_w2c,
+            focal_scale=focal_scale,
+            camera_idx=self.camera_idx,
+        )  # (num_image_pairs, 3, 3)
+
+        # flatten the fundamental matrix
+        fundamental = fundamental.reshape(
+            self.num_image_pairs, 9
+        )  # (num_image_pairs, 9)
+
+        # compute the loss
+        loss = (
+            0.5 * torch.einsum("bi,bij,bj->b", fundamental, self.W, fundamental).sum()
+        )
+
+        # backprop
+        loss.backward()
+
+        # store the loss
+        self._loss = loss
+
+        # return the loss
+        return loss
+
+
 @torch.no_grad()
 def loop(
     R_w2c: torch.Tensor,
@@ -488,80 +621,13 @@ def loop(
     ##### Get original dtype #####
     orig_dtype = R_w2c.dtype
 
-    ##### Find all image pairs with a non-empty set of inliers #####
-    # get point pair idx
-    unique_image_idx, _inverse_idx = torch.unique(
-        torch.stack(
-            [
-                point_pairs.image_idx[point_pairs.point_idx1][point_pair_mask],
-                point_pairs.image_idx[point_pairs.point_idx2][point_pair_mask],
-            ],
-            dim=-1,
-        ),
-        dim=0,
-        return_inverse=True,
-    )  # (num_image_pairs, 2), (num_valid_point_pairs,)
-    image_idx1, image_idx2 = unique_image_idx.unbind(
-        -1
-    )  # (num_image_pairs,), (num_image_pairs,)
-    image_pair_idx = 209347298473 + torch.zeros(
-        point_pairs.num_point_pairs, device=point_pairs.device, dtype=torch.long
-    )  # (num_point_pairs,) use a large number to indicate invalid
-    image_pair_idx[point_pair_mask] = _inverse_idx  # (num_point_pairs,)
-    del unique_image_idx, _inverse_idx
-
-    # get number of image pairs
-    num_image_pairs = image_idx1.shape[0]
-
-    ##### Initialize the weights to be all zero #####
-    weights = torch.zeros(
-        num_point_pairs, device=device, dtype=precision
-    )  # (num_point_pairs,)
-
     ##### Iterative Reweighted Least Squares (IRLS) loop #####
     for irls_step in range(num_irls_steps):
-
-        ##### Compute the quadratic form #####
-        # compute the current fundamental matrix
-        current_fundamental = _compute_fundamental_matrix(
-            image_idx1=image_idx1,
-            image_idx2=image_idx2,
-            R_w2c=R_w2c,
-            t_w2c=t_w2c,
-            focal_scale=focal_scale,
-            camera_idx=camera_idx,
-        )  # (num_image_pairs, 3, 3)
-        debug_old_fundamental = (
-            current_fundamental.clone()
-        )  # debug: keep the old fundamental for debugging
-
-        # compute the weighted quadratic form
-        old_weights = weights.clone()  # (num_point_pairs,)
-        W, weights = quadratic_form(
-            num_image_pairs=num_image_pairs,
-            point_pairs=point_pairs,
-            image_pair_idx=image_pair_idx,
-            prev_fundamental=current_fundamental,
-            point_pair_mask=point_pair_mask,
-            precision=precision,
-        )  # (num_image_pairs, 9, 9)
-
-        # prevent misuse
-        del current_fundamental
 
         ##### Optimization loop #####
         with torch.enable_grad():
             ##### Initialize parameters for optimization #####
             params = EpipolarAdjustmentParameters(
-                R_w2c=R_w2c.contiguous(),
-                t_w2c=t_w2c.contiguous(),
-                focal_scale=focal_scale.contiguous(),
-                precision=precision,
-            )
-            # del R_w2c, t_w2c, focal_scale # debug: resume
-
-            # jiahao debug: build a fresh copy for debugging
-            fresh_params = EpipolarAdjustmentParameters(
                 R_w2c=R_w2c.contiguous(),
                 t_w2c=t_w2c.contiguous(),
                 focal_scale=focal_scale.contiguous(),
@@ -578,74 +644,38 @@ def loop(
                 line_search_fn="strong_wolfe",
             )
 
-            ##### Define the L-BFGS closure #####
-            # use out-of-scope variables to keep track of L-BFGS info
-            loss = torch.tensor(torch.inf, device=device, dtype=precision)
-
-            def lbfgs_closure():
-                # use variables from the outer scope
-                nonlocal params
-                nonlocal optimizer
-                nonlocal loss
-
-                # clear previous gradients
-                optimizer.zero_grad()
-
-                # forward the parameters
-                (
-                    R_w2c,
-                    t_w2c,
-                    focal_scale,
-                ) = params()  # (num_images, 3, 3), (num_images, 3), (num_cameras,)
-
-                # compute the fundamental matrix
-                fundamental = _compute_fundamental_matrix(
-                    image_idx1=image_idx1,
-                    image_idx2=image_idx2,
-                    R_w2c=R_w2c,
-                    t_w2c=t_w2c,
-                    focal_scale=focal_scale,
-                    camera_idx=camera_idx,
-                )  # (num_image_pairs, 3, 3)
-
-                # flatten the fundamental matrix
-                fundamental = fundamental.reshape(
-                    num_image_pairs, 9
-                )  # (num_image_pairs, 9)
-
-                # compute the loss
-                loss = (
-                    0.5
-                    * torch.einsum("bi,bij,bj->b", fundamental, W, fundamental).sum()
-                )
-
-                # backprop
-                loss.backward()
-
-                # update the number of evaluations
-                # num_lbfgs_evals += 1
-                # print(f"Iteration {num_lbfgs_evals}: loss = {final_loss:.8f}")
-
-                # return the loss
-                return loss
+            ##### Build the L-BFGS closure #####
+            closure = Closure(
+                params=params,
+                optimizer=optimizer,
+                R_w2c=R_w2c,
+                t_w2c=t_w2c,
+                focal_scale=focal_scale,
+                point_pairs=point_pairs,
+                point_pair_mask=point_pair_mask,
+                camera_idx=camera_idx,
+                precision=precision,
+            )
 
             ##### Run the L-BFGS loop #####
             min_iter = 20  # debug: use argument
             min_reduction = 1e-5  # debug: use argument
             prev_loss = float("inf")
             iter_idx = 0
-            while iter_idx < min_iter or prev_loss - loss.item() > min_reduction:
+            while (
+                iter_idx < min_iter or prev_loss - closure.loss.item() > min_reduction
+            ):
                 # update the previous loss
-                prev_loss = loss.item()
+                prev_loss = closure.loss.item()
 
                 # run the optimizer step
-                optimizer.step(lbfgs_closure)
+                optimizer.step(closure)
 
                 # print the progress
                 if iter_idx % 1 == 0:
                     print(
-                        f"Iteration {iter_idx}: loss = {loss.item():.8f}, "
-                        f"reduction = {prev_loss - loss.item():.8f}"
+                        f"Iteration {iter_idx}: loss = {closure.loss.item():.8f}, "
+                        f"reduction = {prev_loss - closure.loss.item():.8f}"
                     )
 
                 # increment the iteration index
@@ -667,11 +697,6 @@ def loop(
             quit()
 
         ##### Update the results #####
-        ########
-        old_R_w2c = R_w2c  # debug
-        old_t_w2c = t_w2c  # debug
-        old_focal_scale = focal_scale  # debug
-        ########
         (
             R_w2c,
             t_w2c,
@@ -683,24 +708,6 @@ def loop(
             t_w2c = t_w2c.data
         if isinstance(focal_scale, nn.parameter.Parameter):
             focal_scale = focal_scale.data
-        print("#################")
-        fundamental = _compute_fundamental_matrix(  # debug: recompute fundamental matrix to check if it has changed
-            image_idx1=image_idx1,
-            image_idx2=image_idx2,
-            R_w2c=R_w2c,
-            t_w2c=t_w2c,
-            focal_scale=focal_scale,
-            camera_idx=camera_idx,
-        )  # (num_image_pairs, 3, 3)
-        print(f"R_w2c max change: {torch.max(torch.abs(R_w2c - old_R_w2c)):.8f}")
-        print(f"t_w2c max change: {torch.max(torch.abs(t_w2c - old_t_w2c)):.8f}")
-        print(
-            f"focal_scale max change: {torch.max(torch.abs(focal_scale - old_focal_scale)):.8f}"
-        )
-        print(
-            f"fundamental max change: {torch.max(torch.abs(fundamental - debug_old_fundamental)):.8f}"
-        )
-        print("#################")
 
     ##### Convert to the original dtype #####
     R_w2c = R_w2c.to(orig_dtype)
