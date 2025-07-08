@@ -1,5 +1,6 @@
 from loguru import logger
 import prettytable
+import numpy as np
 import torch
 
 from fastmap.container import ColmapModel, Images, Cameras
@@ -254,6 +255,55 @@ def pairwise_translation_angle_error(
     return err_deg
 
 
+def _get_intersection_idx(
+    images: Images,
+    gt_model: ColmapModel,
+):
+    """Get a vector of image idx for the images being processed and the images in the ground truth model, such that indexing gives us the images in the intersection (with the correct order).
+    Args:
+        images: Images container
+        gt_model: ColmapModel container, ground truth model
+    Returns:
+        pred_idx: torch.Tensor int (num_images_in_intersection,), indices for the images being processed
+        gt_idx: torch.Tensor int (num_images_in_intersection,), indices for the images in the ground truth model
+    """
+    # get device
+    device = images.device
+
+    # get the set of valid image names
+    valid_image_names = set(gt_model.names) & set(
+        [name for i, name in enumerate(images.names) if images.mask[i]]
+    )
+    if len(valid_image_names) == 0:
+        raise ValueError(
+            "No valid images found in the intersection of ground truth and images. Are you sure the provided GT model was run on the same database?"
+        )
+
+    # sort the image idx according to image names
+    pred_sort_idx = np.argsort(images.names).tolist()  # List[int] len=num_images
+    gt_sort_idx = np.argsort(gt_model.names).tolist()  # List[int] len=num_gt_images
+
+    # drop the images that are not in the intersection
+    pred_idx = [
+        idx for idx in pred_sort_idx if images.names[idx] in valid_image_names
+    ]  # List[int] len=num_images_in_intersection
+    gt_idx = [
+        idx for idx in gt_sort_idx if gt_model.names[idx] in valid_image_names
+    ]  # List[int] len=num_images_in_intersection
+    assert len(pred_idx) == len(gt_idx)
+
+    # convert to torch tensors
+    pred_idx = torch.tensor(
+        pred_idx, dtype=torch.long, device=device
+    )  # (num_images_in_intersection,)
+    gt_idx = torch.tensor(
+        gt_idx, dtype=torch.long, device=device
+    )  # (num_images_in_intersection,)
+
+    # return
+    return pred_idx, gt_idx
+
+
 def log_pairwise_rotation_angle_error(
     R_w2c_pred: torch.Tensor,
     images: Images,
@@ -270,9 +320,6 @@ def log_pairwise_rotation_angle_error(
     # init the log string
     log_str = "\nLogging pairwise rotation angle error for debugging:\n"
 
-    # get info
-    device = R_w2c_pred.device
-
     # make sure the shapes are correct
     num_images = R_w2c_pred.shape[0]
     assert R_w2c_pred.shape == (num_images, 3, 3)
@@ -281,45 +328,25 @@ def log_pairwise_rotation_angle_error(
     # get the ground truth rotations
     R_w2c_gt = gt_model.rotation  # (num_gt_images, 3, 3)
 
-    # get the set of valid image names
-    valid_image_names = set(gt_model.names) & set(
-        [name for i, name in enumerate(images.names) if images.mask[i]]
-    )
-    if len(valid_image_names) == 0:
-        raise ValueError(
-            "No valid images found in the intersection of ground truth and images. Are you sure the provided GT model was run on the same database?"
-        )
+    # get idx of images in the intersection of current images and ground truth images
+    pred_idx, gt_idx = _get_intersection_idx(
+        images, gt_model
+    )  # (num_images_in_intersection,), (num_images_in_intersection,)
 
     # log the number of valid and ground truth images
     log_str += f"Number of valid images: {images.mask.long().sum().item()}\n"
     log_str += f"Number of ground truth images: {len(gt_model.names)}\n"
 
-    # make valid mask for the predicted rotations
-    mask_pred = torch.tensor(
-        [name in valid_image_names for name in images.names],
-        dtype=torch.bool,
-        device=device,
-    )  # (num_images,)
-
-    # make valid mask for the ground truth rotations
-    mask_gt = torch.tensor(
-        [name in valid_image_names for name in gt_model.names],
-        dtype=torch.bool,
-        device=device,
-    )  # (num_images,)
-
-    # log the number of images used for the error computation
-    assert len(valid_image_names) == mask_pred.long().sum() == mask_gt.long().sum()
-    log_str += f"Using {mask_pred.long().sum().item()} images for error computation (intersection of valid images and gt images)\n"
+    log_str += f"Using {pred_idx.shape[0]} images for error computation (intersection of valid images and gt images)\n"
 
     # compute the pairwise rotation angle error and drop the diagonal values
     errors = pairwise_rotation_angle_error(
-        R_w2c1=R_w2c_pred[mask_pred], R_w2c2=R_w2c_gt[mask_gt]
+        R_w2c1=R_w2c_pred[pred_idx], R_w2c2=R_w2c_gt[gt_idx]
     )  # (num_valid_images, num_valid_images)
     errors = errors[
         ~torch.eye(errors.shape[0], dtype=torch.bool, device=errors.device)
     ]  # (num_off_diagonal_pairs,)
-    del mask_pred, mask_gt
+    del pred_idx, gt_idx
 
     # compute the quantiles of the errors
     values = {
@@ -362,9 +389,6 @@ def log_pairwise_translation_angle_error(
     # init the log string
     log_str = "\nLogging pairwise translation angle error for debugging:\n"
 
-    # get info
-    device = R_w2c_pred.device
-
     # make sure the shapes are correct
     num_images = R_w2c_pred.shape[0]
     assert R_w2c_pred.shape == (num_images, 3, 3)
@@ -374,48 +398,28 @@ def log_pairwise_translation_angle_error(
     R_w2c_gt = gt_model.rotation  # (num_gt_images, 3, 3)
     t_w2c_gt = gt_model.translation  # (num_gt_images, 3)
 
-    # get the set of valid image names
-    valid_image_names = set(gt_model.names) & set(
-        [name for i, name in enumerate(images.names) if images.mask[i]]
-    )
-    if len(valid_image_names) == 0:
-        raise ValueError(
-            "No valid images found in the intersection of ground truth and images. Are you sure the provided GT model was run on the same database?"
-        )
+    # get idx of images in the intersection of current images and ground truth images
+    pred_idx, gt_idx = _get_intersection_idx(
+        images, gt_model
+    )  # (num_images_in_intersection,), (num_images_in_intersection,)
 
     # log the number of valid and ground truth images
     log_str += f"Number of valid images: {images.mask.long().sum().item()}\n"
     log_str += f"Number of ground truth images: {len(gt_model.names)}\n"
 
-    # make valid mask for the predicted rotations
-    mask_pred = torch.tensor(
-        [name in valid_image_names for name in images.names],
-        dtype=torch.bool,
-        device=device,
-    )  # (num_images,)
-
-    # make valid mask for the ground truth rotations
-    mask_gt = torch.tensor(
-        [name in valid_image_names for name in gt_model.names],
-        dtype=torch.bool,
-        device=device,
-    )  # (num_images,)
-
-    # log the number of images used for the error computation
-    assert len(valid_image_names) == mask_pred.long().sum() == mask_gt.long().sum()
-    log_str += f"Using {mask_pred.long().sum().item()} images for error computation (intersection of valid images and gt images)\n"
+    log_str += f"Using {pred_idx.shape[0]} images for error computation (intersection of valid images and gt images)\n"
 
     # compute the pairwise translation angle error and drop the diagonal values
     errors = pairwise_translation_angle_error(
-        R_w2c1=R_w2c_pred[mask_pred],
-        R_w2c2=R_w2c_gt[mask_gt],
-        t_w2c1=t_w2c_pred[mask_pred],
-        t_w2c2=t_w2c_gt[mask_gt],
+        R_w2c1=R_w2c_pred[pred_idx],
+        R_w2c2=R_w2c_gt[gt_idx],
+        t_w2c1=t_w2c_pred[pred_idx],
+        t_w2c2=t_w2c_gt[gt_idx],
     )  # (num_valid_images, num_valid_images)
     errors = errors[
         ~torch.eye(errors.shape[0], dtype=torch.bool, device=errors.device)
     ]  # (num_off_diagonal_pairs,)
-    del mask_pred, mask_gt
+    del pred_idx, gt_idx
 
     # compute the quantiles of the errors
     values = {
@@ -458,9 +462,6 @@ def log_pairwise_angle_error(
     # init the log string
     log_str = "\nLogging pairwise rotation and translation angle error for debugging:\n"
 
-    # get info
-    device = R_w2c_pred.device
-
     # make sure the shapes are correct
     num_images = R_w2c_pred.shape[0]
     assert R_w2c_pred.shape == (num_images, 3, 3)
@@ -470,40 +471,20 @@ def log_pairwise_angle_error(
     R_w2c_gt = gt_model.rotation  # (num_gt_images, 3, 3)
     t_w2c_gt = gt_model.translation  # (num_gt_images, 3)
 
-    # get the set of valid image names
-    valid_image_names = set(gt_model.names) & set(
-        [name for i, name in enumerate(images.names) if images.mask[i]]
-    )
-    if len(valid_image_names) == 0:
-        raise ValueError(
-            "No valid images found in the intersection of ground truth and images. Are you sure the provided GT model was run on the same database?"
-        )
+    # get idx of images in the intersection of current images and ground truth images
+    pred_idx, gt_idx = _get_intersection_idx(
+        images, gt_model
+    )  # (num_images_in_intersection,), (num_images_in_intersection,)
 
     # log the number of valid and ground truth images
     log_str += f"Number of valid images: {images.mask.long().sum().item()}\n"
     log_str += f"Number of ground truth images: {len(gt_model.names)}\n"
 
-    # make valid mask for the predicted rotations
-    mask_pred = torch.tensor(
-        [name in valid_image_names for name in images.names],
-        dtype=torch.bool,
-        device=device,
-    )  # (num_images,)
-
-    # make valid mask for the ground truth rotations
-    mask_gt = torch.tensor(
-        [name in valid_image_names for name in gt_model.names],
-        dtype=torch.bool,
-        device=device,
-    )  # (num_images,)
-
-    # log the number of images used for the error computation
-    assert len(valid_image_names) == mask_pred.long().sum() == mask_gt.long().sum()
-    log_str += f"Using {mask_pred.long().sum().item()} images for error computation (intersection of valid images and gt images)\n"
+    log_str += f"Using {pred_idx.shape[0]} images for error computation (intersection of valid images and gt images)\n"
 
     # compute the pairwise rotation angle error and drop the diagonal values
     R_errors = pairwise_rotation_angle_error(
-        R_w2c1=R_w2c_pred[mask_pred], R_w2c2=R_w2c_gt[mask_gt]
+        R_w2c1=R_w2c_pred[pred_idx], R_w2c2=R_w2c_gt[gt_idx]
     )  # (num_valid_images, num_valid_images)
     R_errors = R_errors[
         ~torch.eye(R_errors.shape[0], dtype=torch.bool, device=R_errors.device)
@@ -519,15 +500,15 @@ def log_pairwise_angle_error(
 
     # compute the pairwise translation angle error and drop the diagonal values
     t_errors = pairwise_translation_angle_error(
-        R_w2c1=R_w2c_pred[mask_pred],
-        R_w2c2=R_w2c_gt[mask_gt],
-        t_w2c1=t_w2c_pred[mask_pred],
-        t_w2c2=t_w2c_gt[mask_gt],
+        R_w2c1=R_w2c_pred[pred_idx],
+        R_w2c2=R_w2c_gt[gt_idx],
+        t_w2c1=t_w2c_pred[pred_idx],
+        t_w2c2=t_w2c_gt[gt_idx],
     )  # (num_valid_images, num_valid_images)
     t_errors = t_errors[
         ~torch.eye(t_errors.shape[0], dtype=torch.bool, device=t_errors.device)
     ]  # (num_off_diagonal_pairs,)
-    del mask_pred, mask_gt
+    del pred_idx, gt_idx
 
     # compute the quantiles of the translation errors
     t_values = {
