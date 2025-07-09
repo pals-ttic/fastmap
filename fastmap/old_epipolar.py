@@ -9,7 +9,6 @@ from fastmap.utils import (
     to_homogeneous,
     rotation_matrix_to_6d,
     rotation_6d_to_matrix,
-    normalize_matrix,
 )
 from fastmap.utils import ConvergenceManager
 
@@ -206,15 +205,12 @@ def _compute_fundamental_matrix(
     t_w2c2 = torch.index_select(
         input=t_w2c, dim=0, index=image_idx2
     )  # (num_image_pairs, 3)
-    del t_w2c
+    t = torch.einsum("bij,bj->bi", R, -t_w2c1) + t_w2c2  # (B, 3)
+    t = F.normalize(t, p=2, dim=-1)  # (B, 3)
+    del t_w2c, t_w2c1, t_w2c2
 
     # compute essential matrix
-    essential = torch.cross(R, t_w2c1[..., None, :], dim=-1) - torch.cross(
-        t_w2c2[..., None], R, dim=-2
-    )
-
-    # normalize essential matrix
-    essential = normalize_matrix(essential)  # (num_image_pairs, 3, 3)
+    essential = torch.cross(t[..., None], R, dim=-2)  # (num_image_pairs, 3, 3)
 
     # compute fundamental matrix
     focal_scale1_inv = 1.0 / focal_scale[camera_idx[image_idx1]]  # (num_image_pairs,)
