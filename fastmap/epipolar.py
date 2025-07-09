@@ -18,50 +18,41 @@ class EpipolarAdjustmentParameters(nn.Module):
 
     def __init__(
         self,
-        R_w2c: torch.Tensor,
-        t_w2c: torch.Tensor,
+        R_c2w: torch.Tensor,
+        t_c2w: torch.Tensor,
         focal_scale: torch.Tensor,
         precision: torch.dtype = torch.float32,
     ) -> None:
         """
         Args:
-            R_w2c (torch.Tensor): (num_images, 3, 3), the w2c camera rotations
-            t_w2c (torch.Tensor): (num_images, 3), the w2c camera translations
+            R_c2w (torch.Tensor): (num_images, 3, 3), the c2w camera rotations
+            t_c2w (torch.Tensor): (num_images, 3), the c2w camera translations
             focal (torch.Tensor): (num_cameras,), the scale factor on focal lengths
             precision (torch.dtype): the precision for the parameters
         """
         super().__init__()
-        self.rot6d_w2c = nn.Parameter(
-            rotation_matrix_to_6d(R_w2c.clone().to(precision)), requires_grad=True
+        self.rot6d_c2w = nn.Parameter(
+            rotation_matrix_to_6d(R_c2w.clone().to(precision)), requires_grad=True
         )  # (num_images, 6)
-        self.t_w2c = nn.Parameter(
-            t_w2c.clone().to(precision), requires_grad=True
+        self.t_c2w = nn.Parameter(
+            t_c2w.clone().to(precision), requires_grad=True
         )  # (num_images, 3)
         self.focal_scale = nn.Parameter(
             focal_scale.clone().to(precision), requires_grad=True
         )  # (num_cameras,)
 
-    def rotation_parameters(self):
-        return [self.rot6d_w2c]
-
-    def translation_parameters(self):
-        return [self.t_w2c]
-
-    def focal_parameters(self):
-        return [self.focal]
-
     def forward(self):
         """Return the parameters after some processing"""
         # get the parameters
-        rot6d_w2c = self.rot6d_w2c  # (num_images, 6)
-        t_w2c = self.t_w2c  # (num_images, 3)
+        rot6d_c2w = self.rot6d_c2w  # (num_images, 6)
+        t_c2w = self.t_c2w  # (num_images, 3)
         focal_scale = self.focal_scale  # (num_cameras,)
 
         # convert the rotation to matrix
-        R_w2c = rotation_6d_to_matrix(rot6d_w2c)  # (num_images, 3, 3)
+        R_c2w = rotation_6d_to_matrix(rot6d_c2w)  # (num_images, 3, 3)
 
         # return the results
-        return R_w2c, t_w2c, focal_scale
+        return R_c2w, t_c2w, focal_scale
 
 
 @torch.no_grad()
@@ -172,8 +163,8 @@ def quadratic_form(
 def _compute_fundamental_matrix(
     image_idx1: torch.Tensor,
     image_idx2: torch.Tensor,
-    R_w2c: torch.Tensor,
-    t_w2c: torch.Tensor,
+    R_c2w: torch.Tensor,
+    t_c2w: torch.Tensor,
     focal_scale: torch.Tensor,
     camera_idx: torch.Tensor,
 ):
@@ -181,36 +172,35 @@ def _compute_fundamental_matrix(
     Args:
         image_idx1: torch.Tensor long (num_image_pairs,), the first image idx for each pair
         image_idx2: torch.Tensor long (num_image_pairs,), the second image idx for each pair
-        R_w2c: torch.Tensor float (num_images, 3, 3), w2c global rotation matrices for each image
-        t_w2c: torch.Tensor float (num_images, 3), w2c global translation vectors for each image
+        R_c2w: torch.Tensor float (num_images, 3, 3), c2w global rotation matrices for each image
+        t_c2w: torch.Tensor float (num_images, 3), c2w global translation vectors for each image
         focal_scale: torch.Tensor float (num_cameras,), the scale factor on focal lengths
         camera_idx: torch.Tensor long (num_images,), the camera idx for each image
     Returns:
         fundamental: torch.Tensor float (num_image_pairs, 3, 3), the fundamental matrix for each image pair
     """
     # compute relative rotation
-    R_w2c1 = torch.index_select(
-        input=R_w2c, dim=0, index=image_idx1
+    R_c2w1 = torch.index_select(
+        input=R_c2w, dim=0, index=image_idx1
     )  # (num_image_pairs, 3, 3)
-    R_w2c2 = torch.index_select(
-        input=R_w2c, dim=0, index=image_idx2
+    R_c2w2 = torch.index_select(
+        input=R_c2w, dim=0, index=image_idx2
     )  # (num_image_pairs, 3, 3)
-    R = R_w2c2 @ R_w2c1.transpose(-1, -2)  # (num_image_pairs, 3, 3)
-    del R_w2c, R_w2c1, R_w2c2
 
     # get relative translation
-    t_w2c1 = torch.index_select(
-        input=t_w2c, dim=0, index=image_idx1
+    t_c2w1 = torch.index_select(
+        input=t_c2w, dim=0, index=image_idx1
     )  # (num_image_pairs, 3)
-    t_w2c2 = torch.index_select(
-        input=t_w2c, dim=0, index=image_idx2
+    t_c2w2 = torch.index_select(
+        input=t_c2w, dim=0, index=image_idx2
     )  # (num_image_pairs, 3)
-    t = torch.einsum("bij,bj->bi", R, -t_w2c1) + t_w2c2  # (B, 3)
+    t = t_c2w1 - t_c2w2  # (B, 3)
     t = F.normalize(t, p=2, dim=-1)  # (B, 3)
-    del t_w2c, t_w2c1, t_w2c2
 
     # compute essential matrix
-    essential = torch.cross(t[..., None], R, dim=-2)  # (num_image_pairs, 3, 3)
+    essential = R_c2w2.transpose(-1, -2) @ torch.cross(
+        t[..., None], R_c2w1, dim=-2
+    )  # (num_image_pairs, 3, 3)
 
     # compute fundamental matrix
     focal_scale1_inv = 1.0 / focal_scale[camera_idx[image_idx1]]  # (num_image_pairs,)
@@ -234,8 +224,8 @@ def _compute_fundamental_matrix(
 @torch.no_grad()
 def _all_error(
     point_pairs: PointPairs,
-    R_w2c: torch.Tensor,
-    t_w2c: torch.Tensor,
+    R_c2w: torch.Tensor,
+    t_c2w: torch.Tensor,
     focal_scale: torch.Tensor,
     camera_idx: torch.Tensor,
     image_mask: torch.Tensor,
@@ -243,8 +233,8 @@ def _all_error(
     """Compute the epipolar error for all point pairs.
     Args:
         point_pairs: PointPairs container
-        R_w2c: torch.Tensor float (num_images, 3, 3), w2c global rotation matrices for each image
-        t_w2c: torch.Tensor float (num_images, 3), w2c global translation vectors for each image
+        R_c2w: torch.Tensor float (num_images, 3, 3), c2w global rotation matrices for each image
+        t_c2w: torch.Tensor float (num_images, 3), c2w global translation vectors for each image
         focal_scale: torch.Tensor float (num_cameras,), the scale factor on focal lengths
         camera_idx: torch.Tensor long (num_images,), the camera idx for each image
         image_mask: torch.Tensor bool (num_images,), the mask indicating the valid images
@@ -252,7 +242,7 @@ def _all_error(
         error: torch.Tensor float (num_point_pairs,), the epipolar error for each point pair (inf for point pairs involving invalid images)
     """
     # get information
-    device, dtype = R_w2c.device, R_w2c.dtype
+    device, dtype = R_c2w.device, R_c2w.dtype
     num_point_pairs = point_pairs.num_point_pairs
 
     # initialize error
@@ -266,8 +256,8 @@ def _all_error(
         batch_fundamental = _compute_fundamental_matrix(
             image_idx1=batch_data.image_idx1,
             image_idx2=batch_data.image_idx2,
-            R_w2c=R_w2c,
-            t_w2c=t_w2c,
+            R_c2w=R_c2w,
+            t_c2w=t_c2w,
             focal_scale=focal_scale,
             camera_idx=camera_idx,
         )  # (B, 3, 3)
@@ -297,8 +287,8 @@ def _all_error(
 
 @torch.no_grad()
 def loop(
-    R_w2c: torch.Tensor,
-    t_w2c: torch.Tensor,
+    R_c2w: torch.Tensor,
+    t_c2w: torch.Tensor,
     focal_scale: torch.Tensor,
     point_pairs: PointPairs,
     point_pair_mask: torch.Tensor,
@@ -310,8 +300,8 @@ def loop(
     """Global epipolar adjustment loop.
 
     Args:
-        R_w2c: torch.Tensor float (num_images, 3, 3), w2c global rotation matrices for each image
-        t_w2c: torch.Tensor float (num_images, 3), w2c global translation vectors for each image
+        R_c2w: torch.Tensor float (num_images, 3, 3), c2w global rotation matrices for each image
+        t_c2w: torch.Tensor float (num_images, 3), c2w global translation vectors for each image
         focal_scale: torch.Tensor float (num_cameras,), the scale factor on focal lengths
         point_pairs: PointPairs container
         point_pair_mask: torch.Tensor bool (num_point_pairs,), the mask indicating the inlier point pairs
@@ -321,15 +311,15 @@ def loop(
         log_interval: int, the log interval in number of iterations.
 
     Returns:
-        R_w2c: torch.Tensor float (num_images, 3, 3), w2c global rotation
-        t_w2c: torch.Tensor float (num_images, 3), w2c global translation
+        R_c2w: torch.Tensor float (num_images, 3, 3), c2w global rotation
+        t_c2w: torch.Tensor float (num_images, 3), c2w global translation
         focal_scale: torch.Tensor float (num_cameras,), the optimized scale factor on focal lengths.
     """
     ##### Make sure the precision is valid #####
     assert precision in [torch.float32, torch.float64]
 
     ##### Get original dtype #####
-    orig_dtype = R_w2c.dtype
+    orig_dtype = R_c2w.dtype
 
     ##### Find all image pairs with a non-empty set of inliers #####
     # get point pair idx
@@ -361,8 +351,8 @@ def loop(
     initial_fundamental = _compute_fundamental_matrix(
         image_idx1=image_idx1,
         image_idx2=image_idx2,
-        R_w2c=R_w2c,
-        t_w2c=t_w2c,
+        R_c2w=R_c2w,
+        t_c2w=t_c2w,
         focal_scale=focal_scale,
         camera_idx=camera_idx,
     )  # (num_image_pairs, 3, 3)
@@ -382,9 +372,9 @@ def loop(
 
     ##### Initialize parameters for optimization #####
     params = EpipolarAdjustmentParameters(
-        R_w2c=R_w2c, t_w2c=t_w2c, focal_scale=focal_scale, precision=precision
+        R_c2w=R_c2w, t_c2w=t_c2w, focal_scale=focal_scale, precision=precision
     )
-    del R_w2c, t_w2c
+    del R_c2w, t_c2w
 
     ##### Optimizer and convergence manager #####
     # optimizer
@@ -402,8 +392,8 @@ def loop(
     with torch.enable_grad():
         for iter_idx in range(1000000000):
             (
-                R_w2c,
-                t_w2c,
+                R_c2w,
+                t_c2w,
                 focal_scale,
             ) = params()  # (num_images, 3, 3), (num_images, 3), (num_cameras,)
 
@@ -411,8 +401,8 @@ def loop(
             fundamental = _compute_fundamental_matrix(
                 image_idx1=image_idx1,
                 image_idx2=image_idx2,
-                R_w2c=R_w2c,
-                t_w2c=t_w2c,
+                R_c2w=R_c2w,
+                t_c2w=t_c2w,
                 focal_scale=focal_scale,
                 camera_idx=camera_idx,
             )  # (num_image_pairs, 3, 3)
@@ -448,22 +438,22 @@ def loop(
 
     ##### Get the results and convert to the original dtype #####
     (
-        R_w2c,
-        t_w2c,
+        R_c2w,
+        t_c2w,
         focal_scale,
     ) = params()  # (num_images, 3, 3), (num_images, 3), (num_cameras,)
-    if isinstance(R_w2c, nn.parameter.Parameter):
-        R_w2c = R_w2c.data
-    if isinstance(t_w2c, nn.parameter.Parameter):
-        t_w2c = t_w2c.data
+    if isinstance(R_c2w, nn.parameter.Parameter):
+        R_c2w = R_c2w.data
+    if isinstance(t_c2w, nn.parameter.Parameter):
+        t_c2w = t_c2w.data
     if isinstance(focal_scale, nn.parameter.Parameter):
         focal_scale = focal_scale.data
-    R_w2c = R_w2c.to(orig_dtype)
-    t_w2c = t_w2c.to(orig_dtype)
+    R_c2w = R_c2w.to(orig_dtype)
+    t_c2w = t_c2w.to(orig_dtype)
     focal_scale = focal_scale.to(orig_dtype)
 
     ##### Return #####
-    return R_w2c, t_w2c, focal_scale
+    return R_c2w, t_c2w, focal_scale
 
 
 @torch.no_grad()
@@ -530,6 +520,11 @@ def epipolar_adjustment(
         cameras.num_cameras, device=device, dtype=dtype
     )  # (num_cameras,)
 
+    ##### Convert to c2w #####
+    R_c2w = R_w2c.transpose(-1, -2)  # (num_images, 3, 3)
+    t_c2w = -torch.einsum("bij,bj->bi", R_c2w, t_w2c)  # (num_images, 3)
+    del R_w2c, t_w2c
+
     ##### Optimize #####
     for i in range(num_prune_steps + 1):
         with timer(f"Round {i}"):
@@ -541,9 +536,9 @@ def epipolar_adjustment(
                     logger.info(
                         f"[Round {i+1} / {num_prune_steps+1}] Starting IRLS step {j+1} / {num_irls_steps}..."
                     )
-                    R_w2c, t_w2c, focal_scale = loop(
-                        R_w2c=R_w2c,
-                        t_w2c=t_w2c,
+                    R_c2w, t_c2w, focal_scale = loop(
+                        R_c2w=R_c2w,
+                        t_c2w=t_c2w,
                         focal_scale=focal_scale,
                         point_pairs=point_pairs,
                         point_pair_mask=point_pair_mask,
@@ -558,8 +553,8 @@ def epipolar_adjustment(
                 thr = thr_list[i]
                 error = _all_error(
                     point_pairs=point_pairs,
-                    R_w2c=R_w2c,
-                    t_w2c=t_w2c,
+                    R_c2w=R_c2w,
+                    t_c2w=t_c2w,
                     focal_scale=focal_scale,
                     camera_idx=cameras.camera_idx,
                     image_mask=images.mask,
@@ -583,6 +578,11 @@ def epipolar_adjustment(
                 # decay learning rate
                 lr *= lr_decay
                 logger.info(f"Decayed learning rate to {lr}")
+
+    ##### Convert back to w2c #####
+    R_w2c = R_c2w.transpose(-1, -2)  # (num_images, 3, 3)
+    t_w2c = -torch.einsum("bij,bj->bi", R_w2c, t_c2w)  # (num_images, 3)
+    del R_c2w, t_c2w
 
     ##### Return #####
     return R_w2c, t_w2c, focal_scale, point_pair_mask
