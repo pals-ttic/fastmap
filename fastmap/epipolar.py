@@ -226,8 +226,6 @@ class ComputationModule(nn.Module):
             t2[..., None], R_rel, dim=-2
         )
 
-        essential = normalize_matrix(essential)  # (num_image_pairs, 3, 3)
-
         # -------------------------------------------------- #
         # 2. Convert essential to fundamental (intrinsics)   #
         # -------------------------------------------------- #
@@ -245,6 +243,7 @@ class ComputationModule(nn.Module):
         # 3. Quadratic loss over vec(F)                      #
         # -------------------------------------------------- #
         fundamental_vec = fundamental.reshape(-1, 9)  # (B, 9)
+        fundamental_vec = F.normalize(fundamental_vec, p=2, dim=-1)  # (B, 9)
         loss = (
             0.5
             * torch.einsum("bi,bij,bj->b", fundamental_vec, W, fundamental_vec).sum()
