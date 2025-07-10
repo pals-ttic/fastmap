@@ -170,28 +170,85 @@ def quadratic_form(
     return W
 
 
+class Layer1(nn.Module):
+    """Gather per-pair camera poses and compute relative rotation R₂ R₁ᵀ."""
+
+    def forward(
+        self,
+        image_idx1: torch.Tensor,
+        image_idx2: torch.Tensor,
+        R_w2c: torch.Tensor,
+        t_w2c: torch.Tensor,
+    ):
+        R1 = R_w2c.index_select(0, image_idx1)  # (B, 3, 3)
+        R2 = R_w2c.index_select(0, image_idx2)  # (B, 3, 3)
+        t1 = t_w2c.index_select(0, image_idx1)  # (B, 3)
+        t2 = t_w2c.index_select(0, image_idx2)  # (B, 3)
+        R_rel = R2 @ R1.transpose(-1, -2)  # (B, 3, 3)
+        return R_rel, t1, t2
+
+
+class Layer2(nn.Module):
+    """Convert relative pose to an essential matrix."""
+
+    def forward(self, R_rel: torch.Tensor, t1: torch.Tensor, t2: torch.Tensor):
+        term1 = torch.cross(R_rel, t1[..., None, :], dim=-1)
+        term2 = torch.cross(t2[..., None], R_rel, dim=-2)
+        return term1 - term2  # (B, 3, 3)
+
+
+class Layer3(nn.Module):
+    """Inject intrinsics (inverse focal scales) to get the fundamental matrix."""
+
+    def forward(
+        self,
+        essential: torch.Tensor,
+        focal_scale: torch.Tensor,
+        camera_idx: torch.Tensor,
+        image_idx1: torch.Tensor,
+        image_idx2: torch.Tensor,
+    ):
+        f1_inv = 1.0 / focal_scale[camera_idx[image_idx1]]  # (B,)
+        f2_inv = 1.0 / focal_scale[camera_idx[image_idx2]]  # (B,)
+
+        K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)
+        K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)
+
+        return K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B, 3, 3)
+
+
+class Layer4(nn.Module):
+    """ℓ₂-normalise vec(F) and apply the quadratic form ½ vᵀ W v."""
+
+    def forward(self, fundamental: torch.Tensor, W: torch.Tensor):
+        vec = F.normalize(fundamental.reshape(-1, 9), p=2, dim=-1)  # (B, 9)
+        return 0.5 * torch.einsum("bi,bij,bj->b", vec, W, vec).sum()
+
+
 class ComputationModule(nn.Module):
     """Compute the fundamental matrix for all image pairs and a quadratic loss.
 
     Args:
-        image_idx1 (torch.Tensor): long (num_image_pairs,), first image index of each pair.
-        image_idx2 (torch.Tensor): long (num_image_pairs,), second image index of each pair.
-        R_w2c (torch.Tensor): float (num_images, 3, 3), world-to-camera rotation of every image.
-        t_w2c (torch.Tensor): float (num_images, 3), world-to-camera translation of every image.
-        focal_scale (torch.Tensor): float (num_cameras,), scale applied to each camera’s focal length.
-        camera_idx (torch.Tensor): long (num_images,), camera index of every image.
-        W (torch.Tensor): float (num_image_pairs, 9, 9), positive-semidefinite weighting matrices.
+        image_idx1 (torch.Tensor): long (B,), first image index of each pair.
+        image_idx2 (torch.Tensor): long (B,), second image index of each pair.
+        R_w2c (torch.Tensor): float (N, 3, 3), world-to-camera rotation of images.
+        t_w2c (torch.Tensor): float (N, 3), world-to-camera translation.
+        focal_scale (torch.Tensor): float (C,), per-camera focal-length scale.
+        camera_idx (torch.Tensor): long (N,), camera index of each image.
+        W (torch.Tensor): float (B, 9, 9), positive-semidefinite weight matrices.
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]:
-            - loss: torch.Tensor scalar, summed quadratic loss over all pairs.
-            - fundamental: torch.Tensor float (num_image_pairs, 3, 3), the fundamental
-              matrix for each image pair.
+            - loss (scalar)
+            - fundamental (B, 3, 3)
     """
 
-    # ------------------------------------------------------------------ #
-    #                               Forward                              #
-    # ------------------------------------------------------------------ #
+    def __init__(self):
+        super().__init__()
+        self.layer1 = Layer1()
+        self.layer2 = Layer2()
+        self.layer3 = Layer3()
+        self.layer4 = Layer4()
 
     def forward(
         self,
@@ -203,52 +260,12 @@ class ComputationModule(nn.Module):
         camera_idx: torch.Tensor,
         W: torch.Tensor,
     ):
-        """Run the fundamental-matrix computation and quadratic loss.
-
-        Args:
-            image_idx1, image_idx2, R_w2c, t_w2c, focal_scale, camera_idx, W:
-                See class docstring.
-
-        Returns:
-            (loss, fundamental) as described in the class docstring.
-        """
-        # -------------------------------------------------- #
-        # 1. Relative camera pose for each image pair        #
-        # -------------------------------------------------- #
-        R1 = R_w2c.index_select(0, image_idx1)  # (B, 3, 3)
-        R2 = R_w2c.index_select(0, image_idx2)  # (B, 3, 3)
-        t1 = t_w2c.index_select(0, image_idx1)  # (B, 3)
-        t2 = t_w2c.index_select(0, image_idx2)  # (B, 3)
-
-        R_rel = R2 @ R1.transpose(-1, -2)  # (B, 3, 3)
-
-        essential = torch.cross(R_rel, t1[..., None, :], dim=-1) - torch.cross(
-            t2[..., None], R_rel, dim=-2
+        R_rel, t1, t2 = self.layer1(image_idx1, image_idx2, R_w2c, t_w2c)
+        essential = self.layer2(R_rel, t1, t2)
+        fundamental = self.layer3(
+            essential, focal_scale, camera_idx, image_idx1, image_idx2
         )
-
-        # -------------------------------------------------- #
-        # 2. Convert essential to fundamental (intrinsics)   #
-        # -------------------------------------------------- #
-        f1_inv = 1.0 / focal_scale[camera_idx[image_idx1]]  # (B,)
-        f2_inv = 1.0 / focal_scale[camera_idx[image_idx2]]  # (B,)
-
-        K1_inv_diag = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)
-        K2_inv_diag = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)
-
-        fundamental = (
-            K2_inv_diag[:, :, None] * essential * K1_inv_diag[:, None, :]
-        )  # (B, 3, 3)
-
-        # -------------------------------------------------- #
-        # 3. Quadratic loss over vec(F)                      #
-        # -------------------------------------------------- #
-        fundamental_vec = fundamental.reshape(-1, 9)  # (B, 9)
-        fundamental_vec = F.normalize(fundamental_vec, p=2, dim=-1)  # (B, 9)
-        loss = (
-            0.5
-            * torch.einsum("bi,bij,bj->b", fundamental_vec, W, fundamental_vec).sum()
-        )
-
+        loss = self.layer4(fundamental, W)
         return loss
 
 
