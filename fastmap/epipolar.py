@@ -217,12 +217,31 @@ class Layer3(nn.Module):
         return K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B, 3, 3)
 
 
-class Layer4(nn.Module):
-    """Vectorise fundamental matrices and ℓ₂-normalise each row vector."""
+# class Layer4(nn.Module):
+#     """Vectorise fundamental matrices and ℓ₂-normalise each row vector."""
+#
+#     def forward(self, fundamental: torch.Tensor) -> torch.Tensor:  # (B, 3, 3) → (B, 9)
+#         vec = fundamental.reshape(fundamental.shape[0], 9)  # (B, 9)
+#         return F.normalize(vec, p=2, dim=-1)  # (B, 9), unit length
+class Layer4(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, fundamental: torch.Tensor):
+        F_flat = fundamental.reshape(-1, 9)  # (B, 9)
+        F_norm = F_flat.norm(p=2, dim=-1, keepdim=True) + 1e-8  # (B, 1)
+        F_normalized = F_flat / F_norm  # (B, 9)
+        ctx.save_for_backward(F_norm, F_normalized)  # (B, 1), (B, 9)
+        return F_normalized  # (B, 9)
 
-    def forward(self, fundamental: torch.Tensor) -> torch.Tensor:  # (B, 3, 3) → (B, 9)
-        vec = fundamental.reshape(fundamental.shape[0], 9)  # (B, 9)
-        return F.normalize(vec, p=2, dim=-1)  # (B, 9), unit length
+    @staticmethod
+    def backward(ctx, *grad_output):
+        (d_F_normalized,) = grad_output  # (B, 9)
+        (F_norm, F_normalized) = ctx.saved_tensors  # (B, 1), (B, 9)
+        d_flat = (
+            d_F_normalized
+            - (F_normalized * d_F_normalized).sum(dim=-1, keepdim=True) * F_normalized
+        ) / F_norm  # (B, 9)
+        d_fundamental = d_flat.reshape(-1, 3, 3)  # (B, 3, 3)
+        return d_fundamental
 
 
 # class Layer5(nn.Module):
@@ -300,7 +319,7 @@ class ComputationModule(nn.Module):
         self.layer1 = Layer1()
         self.layer2 = Layer2()
         self.layer3 = Layer3()
-        self.layer4 = Layer4()
+        self.layer4 = Layer4.apply
         self.layer5 = Layer5.apply
 
     def forward(
