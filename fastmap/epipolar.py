@@ -171,11 +171,28 @@ def quadratic_form(
     return W
 
 
-class Layer1(nn.Module):
-    """Gather per-pair camera poses and compute relative rotation R₂ R₁ᵀ."""
+# class Layer1(nn.Module):
+#     """Gather per-pair camera poses and compute relative rotation R₂ R₁ᵀ."""
+#
+#     def forward(
+#         self,
+#         image_idx1: torch.Tensor,
+#         image_idx2: torch.Tensor,
+#         R_w2c: torch.Tensor,
+#         t_w2c: torch.Tensor,
+#     ):
+#         R1 = R_w2c.index_select(0, image_idx1)  # (B, 3, 3)
+#         R2 = R_w2c.index_select(0, image_idx2)  # (B, 3, 3)
+#         t1 = t_w2c.index_select(0, image_idx1)  # (B, 3)
+#         t2 = t_w2c.index_select(0, image_idx2)  # (B, 3)
+#         R_rel = R2 @ R1.transpose(-1, -2)  # (B, 3, 3)
+#         return R_rel, t1, t2
 
+
+class Layer1(torch.autograd.Function):
+    @staticmethod
     def forward(
-        self,
+        ctx,
         image_idx1: torch.Tensor,
         image_idx2: torch.Tensor,
         R_w2c: torch.Tensor,
@@ -186,7 +203,53 @@ class Layer1(nn.Module):
         t1 = t_w2c.index_select(0, image_idx1)  # (B, 3)
         t2 = t_w2c.index_select(0, image_idx2)  # (B, 3)
         R_rel = R2 @ R1.transpose(-1, -2)  # (B, 3, 3)
+        ctx.save_for_backward(R_w2c, R1, R2, t1, t2, image_idx1, image_idx2)
         return R_rel, t1, t2
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        (d_R_rel, d_t1, d_t2) = grad_outputs  # (B, 3, 3), (B, 3), (B, 3)
+        R_rel, R1, R2, t1, t2, image_idx1, image_idx2 = (
+            ctx.saved_tensors
+        )  # (B, 3, 3), (B, 3, 3), (B, 3, 3), (B, 3), (B, 3)
+        num_images = R_rel.shape[0]
+        d_R1 = d_R_rel.transpose(-1, -2) @ R2  # (B, 3, 3)
+        d_R2 = d_R_rel @ R1  # (B, 3, 3)
+        d_R_w2c = torch.zeros(
+            (num_images, 3, 3), device=R_rel.device, dtype=R_rel.dtype
+        )  # (B, 3, 3)
+        d_t_w2c = torch.zeros(
+            (num_images, 3), device=R_rel.device, dtype=R_rel.dtype
+        )  # (B, 3)
+        d_R_w2c.scatter_reduce_(
+            dim=0,
+            index=image_idx1[:, None, None].expand(-1, 3, 3),
+            src=d_R1,
+            reduce="sum",
+            include_self=True,
+        )
+        d_R_w2c.scatter_reduce_(
+            dim=0,
+            index=image_idx2[:, None, None].expand(-1, 3, 3),
+            src=d_R2,
+            reduce="sum",
+            include_self=True,
+        )
+        d_t_w2c.scatter_reduce_(
+            dim=0,
+            index=image_idx1[:, None].expand(-1, 3),
+            src=d_t1,
+            reduce="sum",
+            include_self=True,
+        )
+        d_t_w2c.scatter_reduce_(
+            dim=0,
+            index=image_idx2[:, None].expand(-1, 3),
+            src=d_t2,
+            reduce="sum",
+            include_self=True,
+        )
+        return None, None, d_R_w2c, d_t_w2c  # match inputs order
 
 
 # class Layer2(nn.Module):
@@ -586,7 +649,8 @@ class ComputationModule(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.layer1 = Layer1()
+        # self.layer1 = Layer1()
+        self.layer1 = Layer1.apply
         # self.layer2_1 = Layer2_1.apply
         # self.layer2_2 = Layer2_2.apply
         self.layer2 = Layer2.apply
