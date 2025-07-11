@@ -171,268 +171,247 @@ def quadratic_form(
     return W
 
 
-# class Layer1(nn.Module):
-#     """Gather per-pair camera poses and compute relative rotation R₂ R₁ᵀ."""
-#
-#     def forward(
-#         self,
-#         image_idx1: torch.Tensor,
-#         image_idx2: torch.Tensor,
-#         R_w2c: torch.Tensor,
-#         t_w2c: torch.Tensor,
-#     ):
-#         R1 = R_w2c.index_select(0, image_idx1)  # (B, 3, 3)
-#         R2 = R_w2c.index_select(0, image_idx2)  # (B, 3, 3)
-#         t1 = t_w2c.index_select(0, image_idx1)  # (B, 3)
-#         t2 = t_w2c.index_select(0, image_idx2)  # (B, 3)
-#         R_rel = R2 @ R1.transpose(-1, -2)  # (B, 3, 3)
-#         return R_rel, t1, t2
+class AllInOne(torch.autograd.Function):
+    """
+    End-to-end autograd.Function that fuses the five logical layers from the
+    original pipeline into a single forward / backward pair.
 
+    Forward signature matches the original `ComputationModule.forward` inputs:
 
-class Layer1(torch.autograd.Function):
+        loss = AllInOne.apply(
+            image_idx1, image_idx2,
+            R_w2c, t_w2c,
+            focal_scale, camera_idx,
+            W,
+        )
+
+    * No auxiliary helpers are defined here; every unnamed routine
+      (e.g. `vector_to_skew_symmetric_matrix`) is assumed to exist.
+    """
+
     @staticmethod
-    def forward(
+    def forward(  # pylint: disable=too-many-locals
         ctx,
-        image_idx1: torch.Tensor,
-        image_idx2: torch.Tensor,
-        R_w2c: torch.Tensor,
-        t_w2c: torch.Tensor,
-    ):
-        R1 = R_w2c.index_select(0, image_idx1)  # (B, 3, 3)
-        R2 = R_w2c.index_select(0, image_idx2)  # (B, 3, 3)
-        t1 = t_w2c.index_select(0, image_idx1)  # (B, 3)
-        t2 = t_w2c.index_select(0, image_idx2)  # (B, 3)
-        R_rel = R2 @ R1.transpose(-1, -2)  # (B, 3, 3)
-        ctx.save_for_backward(R_w2c, R1, R2, t1, t2, image_idx1, image_idx2)
-        return R_rel, t1, t2
+        image_idx1: torch.Tensor,  # long  (B,)
+        image_idx2: torch.Tensor,  # long  (B,)
+        R_w2c: torch.Tensor,  # float (N, 3, 3)
+        t_w2c: torch.Tensor,  # float (N, 3)
+        focal_scale: torch.Tensor,  # float (C,)
+        camera_idx: torch.Tensor,  # long  (N,)
+        W: torch.Tensor,  # float (B, 9, 9)
+    ) -> torch.Tensor:  # scalar loss
+        # ------------------------------------------------------------------ #
+        # Layer-1: gather poses & relative rotation
+        # ------------------------------------------------------------------ #
+        R1 = R_w2c.index_select(0, image_idx1)  # (B,3,3)
+        R2 = R_w2c.index_select(0, image_idx2)  # (B,3,3)
+        t1 = t_w2c.index_select(0, image_idx1)  # (B,3)
+        t2 = t_w2c.index_select(0, image_idx2)  # (B,3)
+        R_rel = R2 @ R1.transpose(-1, -2)  # (B,3,3)
 
-    @staticmethod
-    def backward(ctx, *grad_outputs):
-        (d_R_rel, d_t1, d_t2) = grad_outputs  # (B, 3, 3), (B, 3), (B, 3)
-        R_rel, R1, R2, t1, t2, image_idx1, image_idx2 = (
-            ctx.saved_tensors
-        )  # (B, 3, 3), (B, 3, 3), (B, 3, 3), (B, 3), (B, 3)
-        num_images = R_rel.shape[0]
-        d_R1 = d_R_rel.transpose(-1, -2) @ R2  # (B, 3, 3)
-        d_R2 = d_R_rel @ R1  # (B, 3, 3)
-        d_R_w2c = torch.zeros(
-            (num_images, 3, 3), device=R_rel.device, dtype=R_rel.dtype
-        )  # (B, 3, 3)
-        d_t_w2c = torch.zeros(
-            (num_images, 3), device=R_rel.device, dtype=R_rel.dtype
-        )  # (B, 3)
-        d_R_w2c.scatter_reduce_(
-            dim=0,
-            index=image_idx1[:, None, None].expand(-1, 3, 3),
-            src=d_R1,
-            reduce="sum",
-            include_self=True,
-        )
-        d_R_w2c.scatter_reduce_(
-            dim=0,
-            index=image_idx2[:, None, None].expand(-1, 3, 3),
-            src=d_R2,
-            reduce="sum",
-            include_self=True,
-        )
-        d_t_w2c.scatter_reduce_(
-            dim=0,
-            index=image_idx1[:, None].expand(-1, 3),
-            src=d_t1,
-            reduce="sum",
-            include_self=True,
-        )
-        d_t_w2c.scatter_reduce_(
-            dim=0,
-            index=image_idx2[:, None].expand(-1, 3),
-            src=d_t2,
-            reduce="sum",
-            include_self=True,
-        )
-        return None, None, d_R_w2c, d_t_w2c  # match inputs order
+        # ------------------------------------------------------------------ #
+        # Layer-2: essential matrix
+        # ------------------------------------------------------------------ #
+        t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
+        t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
+        essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
 
-
-class Layer2(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, R_rel: torch.Tensor, t1: torch.Tensor, t2: torch.Tensor):
-        t1_x = vector_to_skew_symmetric_matrix(t1)  # (B, 3, 3)
-        t2_x = vector_to_skew_symmetric_matrix(t2)  # (B, 3, 3)
-        term1 = R_rel @ t1_x  # (B, 3, 3)
-        term2 = t2_x @ R_rel  # (B, 3, 3)
-        E = term1 - term2  # (B, 3, 3)
-        ctx.save_for_backward(R_rel, t1_x, t2_x)
-        return E
-
-    @staticmethod
-    def backward(ctx, *grad_outputs):
-        (d_E,) = grad_outputs
-        R_rel, t1_x, t2_x = ctx.saved_tensors
-        # dE = R_rel @ t1_x − t2_x @ R_rel
-        # Use d(A@B) rules:  dA = dE @ Bᵀ ;  dB = Aᵀ @ dE
-        d_R_rel = d_E @ t1_x.transpose(-1, -2) - t2_x.transpose(-1, -2) @ d_E
-        d_t1_x = R_rel.transpose(-1, -2) @ d_E
-        d_t2_x = -d_E @ R_rel.transpose(-1, -2)
-
-        # Map skew-matrix gradients back to vector form.
-        def skew_grad_to_vec(d_tx: torch.Tensor) -> torch.Tensor:
-            return torch.stack(
-                [
-                    d_tx[:, 2, 1] - d_tx[:, 1, 2],
-                    d_tx[:, 0, 2] - d_tx[:, 2, 0],
-                    d_tx[:, 1, 0] - d_tx[:, 0, 1],
-                ],
-                dim=-1,
-            )
-
-        d_t1 = skew_grad_to_vec(d_t1_x)  # (B, 3)
-        d_t2 = skew_grad_to_vec(d_t2_x)  # (B, 3)
-        return d_R_rel, d_t1, d_t2  # match inputs order
-
-
-class Layer3(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        essential: torch.Tensor,
-        focal_scale: torch.Tensor,
-        camera_idx: torch.Tensor,
-        image_idx1: torch.Tensor,
-        image_idx2: torch.Tensor,
-    ):
+        # ------------------------------------------------------------------ #
+        # Layer-3: fundamental matrix (unnormalised)
+        # ------------------------------------------------------------------ #
         f1_inv = 1.0 / focal_scale[camera_idx[image_idx1]]  # (B,)
         f2_inv = 1.0 / focal_scale[camera_idx[image_idx2]]  # (B,)
+        K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)  # (B,3)
+        K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)  # (B,3)
+        fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
 
-        K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)
-        K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)
+        # ------------------------------------------------------------------ #
+        # Layer-4: ℓ2-normalise the 9-vector
+        # ------------------------------------------------------------------ #
+        F_flat = fundamental.reshape(-1, 9)  # (B,9)
+        F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
+        F_normalised = F_flat / F_norm  # (B,9)
 
-        F = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B, 3, 3)
+        # ------------------------------------------------------------------ #
+        # Layer-5: quadratic loss
+        # ------------------------------------------------------------------ #
+        W_vec = torch.einsum("bij,bj->bi", W, F_normalised)  # (B,9)
+        loss = 0.5 * (F_normalised * W_vec).sum()  # scalar
+
+        # ------------------------------------------------------------------ #
+        # Save everything needed for the backward pass
+        # ------------------------------------------------------------------ #
         ctx.save_for_backward(
+            image_idx1,
+            image_idx2,
+            camera_idx,  # indices
+            R_w2c,
+            t_w2c,
+            R1,
+            R2,
+            R_rel,  # rotations
+            t1_x,
+            t2_x,  # skew mats
+            essential,  # (B,3,3)
+            f1_inv,
+            f2_inv,
+            K1_inv,
+            K2_inv,  # intrinsics
+            F_norm,
+            F_normalised,  # norm stuff
+            focal_scale,  # (C,)
+            W_vec,
+            W,  # weights
+        )
+        return loss
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        (d_L,) = grad_outputs
+        (  # unpack saved tensors
+            image_idx1,
+            image_idx2,
+            camera_idx,
+            R_w2c,
+            t_w2c,
+            R1,
+            R2,
+            R_rel,
+            t1_x,
+            t2_x,
             essential,
             f1_inv,
             f2_inv,
             K1_inv,
             K2_inv,
-            camera_idx,
-            image_idx1,
-            image_idx2,
+            F_norm,
+            F_normalised,
             focal_scale,
-        )
-        return F
-
-    @staticmethod
-    def backward(
-        ctx,
-        *grad_outputs,
-    ):
-        (d_F,) = grad_outputs  # (B, 3, 3)
-        (
-            E,
-            f1_inv,
-            f2_inv,
-            K1_inv,
-            K2_inv,
-            camera_idx,
-            image_idx1,
-            image_idx2,
-            focal_scale,
+            W_vec,
+            W,
         ) = ctx.saved_tensors
-        d_E = d_F * K2_inv[:, :, None] * K1_inv[:, None, :]  # (B, 3, 3)
-        d_K1_inv = d_F * E * K2_inv[:, :, None]  # (B, 3, 3)
-        d_K2_inv = d_F * E * K1_inv[:, None, :]  # (B, 3, 3)
-        d_f1_inv = d_K1_inv[:, :, :2].sum(dim=-1).sum(dim=-1)  # (B,)
-        d_f2_inv = d_K2_inv[:, :2, :].sum(dim=-1).sum(dim=-1)  # (B,)
-        d_f1 = -d_f1_inv / f1_inv**2  # (B,)
-        d_f2 = -d_f2_inv / f2_inv**2  # (B,)
-        d_f = torch.zeros(
-            len(focal_scale), device=K1_inv.device, dtype=K1_inv.dtype
-        )  # (num_cameras,)
-        d_f.scatter_reduce_(
-            dim=0,
-            index=camera_idx[image_idx1],
-            src=d_f1,
+        B = image_idx1.shape[0]
+
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-5
+        # -------------------------------------------------------------- #
+        d_vec = W_vec * d_L  # (B,9)
+        d_W = torch.zeros_like(W)  # ignore W
+
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-4
+        # -------------------------------------------------------------- #
+        d_F_flat = (
+            d_vec - (F_normalised * d_vec).sum(dim=-1, keepdim=True) * F_normalised
+        ) / F_norm  # (B,9)
+        d_F = d_F_flat.view(-1, 3, 3)  # (B,3,3)
+
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-3
+        # -------------------------------------------------------------- #
+        d_E = d_F * K2_inv[:, :, None] * K1_inv[:, None, :]  # (B,3,3)
+        d_K1_inv = d_F * essential * K2_inv[:, :, None]  # (B,3,3)
+        d_K2_inv = d_F * essential * K1_inv[:, None, :]  # (B,3,3)
+
+        d_f1_inv = d_K1_inv[:, :, :2].sum((-1, -2))  # (B,)
+        d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
+
+        d_f1 = -d_f1_inv / (f1_inv**2)  # (B,)
+        d_f2 = -d_f2_inv / (f2_inv**2)  # (B,)
+
+        num_cam = focal_scale.shape[0]
+        d_focal = focal_scale.new_zeros(num_cam)  # (C,)
+        d_focal.scatter_reduce_(  # f1 terms
+            0, camera_idx[image_idx1], d_f1, reduce="sum", include_self=True
+        )
+        d_focal.scatter_reduce_(  # f2 terms
+            0, camera_idx[image_idx2], d_f2, reduce="sum", include_self=True
+        )
+
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-2
+        # -------------------------------------------------------------- #
+        d_R_rel = d_E @ t1_x.transpose(-1, -2) - t2_x.transpose(-1, -2) @ d_E  # (B,3,3)
+        d_t1_x = R_rel.transpose(-1, -2) @ d_E  # (B,3,3)
+        d_t2_x = -d_E @ R_rel.transpose(-1, -2)  # (B,3,3)
+
+        d_t1 = torch.stack(  # (B,3)
+            (
+                d_t1_x[:, 2, 1] - d_t1_x[:, 1, 2],
+                d_t1_x[:, 0, 2] - d_t1_x[:, 2, 0],
+                d_t1_x[:, 1, 0] - d_t1_x[:, 0, 1],
+            ),
+            dim=-1,
+        )
+        d_t2 = torch.stack(  # (B,3)
+            (
+                d_t2_x[:, 2, 1] - d_t2_x[:, 1, 2],
+                d_t2_x[:, 0, 2] - d_t2_x[:, 2, 0],
+                d_t2_x[:, 1, 0] - d_t2_x[:, 0, 1],
+            ),
+            dim=-1,
+        )
+
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-1
+        # -------------------------------------------------------------- #
+        d_R1 = d_R_rel.transpose(-1, -2) @ R2  # (B,3,3)
+        d_R2 = d_R_rel @ R1  # (B,3,3)
+
+        N = len(R_w2c)  # number of images
+        d_R_w2c = torch.zeros(
+            (N, 3, 3), device=R_w2c.device, dtype=R_w2c.dtype
+        )  # (N,3,3)
+        d_t_w2c = torch.zeros((N, 3), device=t_w2c.device, dtype=t_w2c.dtype)  # (N,3)
+
+        d_R_w2c.scatter_reduce_(
+            0,
+            image_idx1[:, None, None].expand(-1, 3, 3),
+            d_R1,
             reduce="sum",
             include_self=True,
         )
-        d_f.scatter_reduce_(
-            dim=0,
-            index=camera_idx[image_idx2],
-            src=d_f2,
+        d_R_w2c.scatter_reduce_(
+            0,
+            image_idx2[:, None, None].expand(-1, 3, 3),
+            d_R2,
+            reduce="sum",
+            include_self=True,
+        )
+        d_t_w2c.scatter_reduce_(
+            0,
+            image_idx1[:, None].expand(-1, 3),
+            d_t1,
+            reduce="sum",
+            include_self=True,
+        )
+        d_t_w2c.scatter_reduce_(
+            0,
+            image_idx2[:, None].expand(-1, 3),
+            d_t2,
             reduce="sum",
             include_self=True,
         )
 
-        return d_E, d_f, None, None, None
+        # -------------------------------------------------------------- #
+        # Return grads in input order
+        # -------------------------------------------------------------- #
+        return (
+            None,  # image_idx1 (long)
+            None,  # image_idx2 (long)
+            d_R_w2c,  # R_w2c
+            d_t_w2c,  # t_w2c
+            d_focal,  # focal_scale
+            None,  # camera_idx (long)
+            d_W,  # W  (zeros)
+        )
 
 
-class Layer4(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, fundamental: torch.Tensor):
-        F_flat = fundamental.reshape(-1, 9)  # (B, 9)
-        F_norm = F_flat.norm(p=2, dim=-1, keepdim=True) + 1e-8  # (B, 1)
-        F_normalized = F_flat / F_norm  # (B, 9)
-        ctx.save_for_backward(F_norm, F_normalized)  # (B, 1), (B, 9)
-        return F_normalized  # (B, 9)
-
-    @staticmethod
-    def backward(ctx, *grad_output):
-        (d_F_normalized,) = grad_output  # (B, 9)
-        (F_norm, F_normalized) = ctx.saved_tensors  # (B, 1), (B, 9)
-        d_flat = (
-            d_F_normalized
-            - (F_normalized * d_F_normalized).sum(dim=-1, keepdim=True) * F_normalized
-        ) / F_norm  # (B, 9)
-        d_fundamental = d_flat.reshape(-1, 3, 3)  # (B, 3, 3)
-        return d_fundamental
-
-
-class Layer5(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, vec: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
-        W_vec = torch.einsum("bij,bj->bi", W, vec)  # (B, 9)
-        ctx.save_for_backward(W_vec)  # (B, 9)
-        loss = 0.5 * (vec * W_vec).sum()  # scalar
-        return loss
-
-    @staticmethod
-    def backward(ctx, *grad_outputs):
-        (d_loss,) = grad_outputs
-        (W_vec,) = ctx.saved_tensors  # (B, 9)
-        d_vec = W_vec * d_loss  # (B, 9)
-        d_W = torch.zeros(
-            (W_vec.shape[0], 9, 9), device=W_vec.device, dtype=W_vec.dtype
-        )  # (B, 9, 9)
-        return d_vec, d_W  # (B, 9), (B, 9, 9)
-
-
+# ---------------------------------------------------------------------- #
+# Example wrapper module ------------------------------------------------ #
+# ---------------------------------------------------------------------- #
 class ComputationModule(nn.Module):
-    """Compute the fundamental matrix for all image pairs and a quadratic loss.
-
-    Args:
-        image_idx1 (torch.Tensor): long (B,), first image index of each pair.
-        image_idx2 (torch.Tensor): long (B,), second image index of each pair.
-        R_w2c (torch.Tensor): float (N, 3, 3), world-to-camera rotation of images.
-        t_w2c (torch.Tensor): float (N, 3), world-to-camera translation.
-        focal_scale (torch.Tensor): float (C,), per-camera focal-length scale.
-        camera_idx (torch.Tensor): long (N,), camera index of each image.
-        W (torch.Tensor): float (B, 9, 9), positive-semidefinite weight matrices.
-
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]:
-            - loss (scalar)
-            - fundamental (B, 3, 3)
-    """
-
-    def __init__(self):
-        super().__init__()
-        # self.layer1 = Layer1()
-        self.layer1 = Layer1.apply
-        # self.layer2_1 = Layer2_1.apply
-        # self.layer2_2 = Layer2_2.apply
-        self.layer2 = Layer2.apply
-        # self.layer2 = Layer2()
-        self.layer3 = Layer3.apply
-        self.layer4 = Layer4.apply
-        self.layer5 = Layer5.apply
+    """Convenience wrapper that calls the fused autograd.Function."""
 
     def forward(
         self,
@@ -443,17 +422,16 @@ class ComputationModule(nn.Module):
         focal_scale: torch.Tensor,
         camera_idx: torch.Tensor,
         W: torch.Tensor,
-    ):
-        R_rel, t1, t2 = self.layer1(image_idx1, image_idx2, R_w2c, t_w2c)
-        essential = self.layer2(R_rel, t1, t2)
-        # t1_x, t2_x = self.layer2_1(t1, t2)
-        # essential = self.layer2_2(R_rel, t1_x, t2_x)  # (B, 3, 3)
-        fundamental = self.layer3(
-            essential, focal_scale, camera_idx, image_idx1, image_idx2
+    ) -> torch.Tensor:  # returns scalar loss
+        return AllInOne.apply(
+            image_idx1,
+            image_idx2,
+            R_w2c,
+            t_w2c,
+            focal_scale,
+            camera_idx,
+            W,
         )
-        fundamental = self.layer4(fundamental)  # (B, 9)
-        loss = self.layer5(fundamental, W)
-        return loss
 
 
 def _compute_fundamental_matrix(
