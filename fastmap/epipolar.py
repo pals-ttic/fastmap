@@ -39,31 +39,23 @@ class EpipolarAdjustmentParameters(nn.Module):
         self.t_w2c = nn.Parameter(
             t_w2c.clone().to(precision), requires_grad=True
         )  # (num_images, 3)
-        self.focal_scale = nn.Parameter(
-            focal_scale.clone().to(precision), requires_grad=True
+        self.inv_focal_scale = nn.Parameter(
+            (1.0 / focal_scale).to(precision), requires_grad=True
         )  # (num_cameras,)
-
-    def rotation_parameters(self):
-        return [self.rot6d_w2c]
-
-    def translation_parameters(self):
-        return [self.t_w2c]
-
-    def focal_parameters(self):
-        return [self.focal]
 
     def forward(self):
         """Return the parameters after some processing"""
         # get the parameters
         rot6d_w2c = self.rot6d_w2c  # (num_images, 6)
         t_w2c = self.t_w2c  # (num_images, 3)
-        focal_scale = self.focal_scale  # (num_cameras,)
+        inv_focal_scale = self.inv_focal_scale  # (num_cameras,)
+        focal_scale = 1.0 / inv_focal_scale  # (num_cameras,)
 
         # convert the rotation to matrix
         R_w2c = rotation_6d_to_matrix(rot6d_w2c)  # (num_images, 3, 3)
 
         # return the results
-        return R_w2c, t_w2c, focal_scale
+        return R_w2c, t_w2c, focal_scale, inv_focal_scale
 
 
 @torch.no_grad()
@@ -211,7 +203,7 @@ def compute_gradients(
     image_camera_indices: torch.Tensor,  # long (B, 4)
     R_w2c: torch.Tensor,  # float (N, 3, 3)
     t_w2c: torch.Tensor,  # float (N, 3)
-    focal_scale: torch.Tensor,  # float (C,)
+    inv_focal_scale: torch.Tensor,  # float (C,)
     W: torch.Tensor,  # float (B, 9, 9)
 ):
     # unbind image and camera indices
@@ -238,8 +230,8 @@ def compute_gradients(
     # ------------------------------------------------------------------ #
     # Layer-3: fundamental matrix (unnormalised)
     # ------------------------------------------------------------------ #
-    f1_inv = 1.0 / focal_scale[camera_idx1]  # (B,)
-    f2_inv = 1.0 / focal_scale[camera_idx2]  # (B,)
+    f1_inv = inv_focal_scale[camera_idx1]  # (B,)
+    f2_inv = inv_focal_scale[camera_idx2]  # (B,)
     K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)  # (B,3)
     K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)  # (B,3)
     fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
@@ -280,17 +272,12 @@ def compute_gradients(
     d_f1_inv = d_K1_inv[:, :, :2].sum((-1, -2))  # (B,)
     d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
 
-    d_f1 = -d_f1_inv / (f1_inv**2)  # (B,)
-    d_f2 = -d_f2_inv / (f2_inv**2)  # (B,)
-
-    num_cam = focal_scale.shape[0]
-    d_focal = focal_scale.new_zeros(num_cam)  # (C,)
-    d_focal.scatter_reduce_(  # f1 terms
-        0, camera_idx1, d_f1, reduce="sum", include_self=True
-    )
-    d_focal.scatter_reduce_(  # f2 terms
-        0, camera_idx2, d_f2, reduce="sum", include_self=True
-    )
+    num_cam = inv_focal_scale.shape[0]
+    d_f_inv = torch.zeros(
+        (num_cam,), device=inv_focal_scale.device, dtype=inv_focal_scale.dtype
+    )  # (C,)
+    d_f_inv.scatter_reduce_(0, camera_idx1, d_f1_inv, reduce="sum", include_self=True)
+    d_f_inv.scatter_reduce_(0, camera_idx2, d_f2_inv, reduce="sum", include_self=True)
 
     # -------------------------------------------------------------- #
     # ⇢ Layer-2
@@ -362,7 +349,7 @@ def compute_gradients(
         loss,
         d_R_w2c,  # R_w2c
         d_t_w2c,  # t_w2c
-        d_focal,  # focal_scale
+        d_f_inv,  # inv_focal_scale
     )
 
 
@@ -598,7 +585,7 @@ def loop(
     params = EpipolarAdjustmentParameters(
         R_w2c=R_w2c, t_w2c=t_w2c, focal_scale=focal_scale, precision=precision
     )
-    del R_w2c, t_w2c
+    del R_w2c, t_w2c, focal_scale
 
     ##### Optimizer and convergence manager #####
     # optimizer
@@ -621,7 +608,8 @@ def loop(
             (
                 R_w2c,
                 t_w2c,
-                focal_scale,
+                _,  # focal_scale
+                inv_focal_scale,
             ) = params()  # (num_images, 3, 3), (num_images, 3), (num_cameras,)
 
             # compute the loss
@@ -634,11 +622,11 @@ def loop(
             #     camera_idx=camera_idx,
             #     W=W,
             # )
-            loss, d_R_w2c, d_t_w2c, d_focal = compute_gradients(
+            loss, d_R_w2c, d_t_w2c, d_inv_focal_scale = compute_gradients(
                 image_camera_indices=image_camera_indices,  # (num_image_pairs, 4)
                 R_w2c=R_w2c,
                 t_w2c=t_w2c,
-                focal_scale=focal_scale,
+                inv_focal_scale=inv_focal_scale,  # (num_cameras,)
                 W=W,
             )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
 
@@ -648,8 +636,8 @@ def loop(
 
             # backward
             torch.autograd.backward(
-                tensors=[R_w2c, t_w2c, focal_scale],
-                grad_tensors=[d_R_w2c, d_t_w2c, d_focal],
+                tensors=[R_w2c, t_w2c, inv_focal_scale],
+                grad_tensors=[d_R_w2c, d_t_w2c, d_inv_focal_scale],
             )
 
             # step
@@ -694,6 +682,7 @@ def loop(
         R_w2c,
         t_w2c,
         focal_scale,
+        _,  # inv_focal_scale
     ) = params()  # (num_images, 3, 3), (num_images, 3), (num_cameras,)
     if isinstance(R_w2c, nn.parameter.Parameter):
         R_w2c = R_w2c.data
