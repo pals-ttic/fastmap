@@ -165,38 +165,86 @@ def quadratic_form(
 
 # @triton.jit
 # def triton_kernel(
-#     E_ptr,
-#     image_idx1_ptr,
-#     image_idx2_ptr,
+#     out_R_rel_ptr,
+#     image_camera_indices_ptr,
 #     R_w2c_ptr,
 #     t_w2c_ptr,
-#     focal_scale_ptr,
+#     inv_focal_scale_ptr,
 #     num_rows,
-#     BLOCK_SIZE: tl.constexpr,
 # ):
+#     # assume all the tensors to be contiguous
 #     # starting row of the program
 #     row_start = tl.program_id(0)
 #     row_step = tl.num_programs(0)
-#     for row_idx in tl.range(row_start, n_rows, row_step, num_stages=num_stages):
-#         # The stride represents how much we need to increase the pointer to advance 1 row
-#         row_start_ptr = input_ptr + row_idx * input_row_stride
-#         # The block size is the next power of two greater than n_cols, so we can fit each
-#         # row in a single block
-#         col_offsets = tl.arange(0, BLOCK_SIZE)
-#         input_ptrs = row_start_ptr + col_offsets
-#         # Load the row into SRAM, using a mask since BLOCK_SIZE may be > than n_cols
-#         mask = col_offsets < n_cols
-#         row = tl.load(input_ptrs, mask=mask, other=-float("inf"))
-#         # Subtract maximum for numerical stability
-#         row_minus_max = row - tl.max(row, axis=0)
-#         # Note that exponentiation in Triton is fast but approximate (i.e., think __expf in CUDA)
-#         numerator = tl.exp(row_minus_max)
-#         denominator = tl.sum(numerator, axis=0)
-#         softmax_output = numerator / denominator
-#         # Write back output to DRAM
-#         output_row_start_ptr = output_ptr + row_idx * output_row_stride
-#         output_ptrs = output_row_start_ptr + col_offsets
-#         tl.store(output_ptrs, softmax_output, mask=mask)
+#     for row_idx in tl.range(row_start, num_rows, row_step, num_stages=0):  # type: ignore
+#         # load image and camera indices
+#         idx_row_start_ptr = image_camera_indices_ptr + row_idx * 4  # long ptr
+#         image_idx1_ptr = idx_row_start_ptr + 0  # long ptr
+#         image_idx2_ptr = idx_row_start_ptr + 1  # long ptr
+#         camera_idx1_ptr = idx_row_start_ptr + 2  # long ptr
+#         camera_idx2_ptr = idx_row_start_ptr + 3  # long ptr
+#         image_idx1 = tl.load(image_idx1_ptr)  # long
+#         image_idx2 = tl.load(image_idx2_ptr)  # long
+#         camera_idx1 = tl.load(camera_idx1_ptr)  # long
+#         camera_idx2 = tl.load(camera_idx2_ptr)  # long
+#
+#         # load R_w2c, t_w2c (note that arange only works for power of 2)
+#         R_row_offset = tl.arange(0, 4)[:, None]  # long (4, 1)
+#         R_col_offset = tl.arange(0, 4)[None, :]  # long (1, 4)
+#         R_offset = R_row_offset * 3 + R_col_offset  # long (4, 4)
+#         R_mask = (R_col_offset < 3) & (R_row_offset < 3)  # long (4, 4)
+#         t_offset = tl.arange(0, 4)  # long (4,)
+#         t_mask = t_offset < 3  # long (4,)
+#         R1_ptrs = R_w2c_ptr + image_idx1 * 9 + R_offset  # float (4, 4)
+#         R2_ptrs = R_w2c_ptr + image_idx2 * 9 + R_offset  # float (4, 4)
+#         t1_ptrs = t_w2c_ptr + image_idx1 * 3 + t_offset  # float (4,)
+#         t2_ptrs = t_w2c_ptr + image_idx2 * 3 + t_offset  # float (4,)
+#         R1 = tl.load(R1_ptrs, mask=R_mask, other=0.0)  # float (4, 4)
+#         R2 = tl.load(R2_ptrs, mask=R_mask, other=0.0)  # float (4, 4)
+#         t1 = tl.load(t1_ptrs, mask=t_mask, other=0.0)  # float (4,)
+#         t2 = tl.load(t2_ptrs, mask=t_mask, other=0.0)  # float (4,)
+#
+#         # compute relative rotation
+#         R_rel = tl.dot(R2, tl.trans(R1, 0, 1))  # float (4, 4)
+#
+#         # store
+#         R_rel_ptrs = out_R_rel_ptr + row_idx * 9 + R_offset  # float (4, 4)
+#         tl.store(R_rel_ptrs, R_rel, mask=R_mask)
+#
+#
+# def triton_wrapper(
+#     image_camera_indices: torch.Tensor,
+#     R_w2c: torch.Tensor,
+#     t_w2c: torch.Tensor,
+#     inv_focal_scale: torch.Tensor,
+#     W: torch.Tensor,
+# ):
+#     # get information
+#     device, dtype = R_w2c.device, R_w2c.dtype
+#     num_image_pairs = image_camera_indices.shape[0]
+#     num_rows = num_image_pairs
+#
+#     # allocate output tensors
+#     R_rel = torch.zeros(
+#         (num_image_pairs, 3, 3), device=device, dtype=dtype
+#     )  # (num_image_pairs, 3, 3)
+#
+#     # hyperparameters to tune
+#     num_warps = 1  # debug: where is this used?
+#     num_programs = min(num_rows, 4096)  # number of programs to launch
+#
+#     # launch
+#     triton_kernel[(num_programs, 1, 1)](
+#         R_rel,
+#         image_camera_indices,
+#         R_w2c,
+#         t_w2c,
+#         inv_focal_scale,
+#         num_rows,
+#     )
+#
+#     # return the result
+#     return R_rel
 
 
 def compute_gradients(
@@ -206,10 +254,26 @@ def compute_gradients(
     inv_focal_scale: torch.Tensor,  # float (C,)
     W: torch.Tensor,  # float (B, 9, 9)
 ):
+    # make sure everything is contiguous
+    assert image_camera_indices.is_contiguous()
+    assert R_w2c.is_contiguous()
+    assert t_w2c.is_contiguous()
+    assert inv_focal_scale.is_contiguous()
+    assert W.is_contiguous()
+
     # unbind image and camera indices
     image_idx1, image_idx2, camera_idx1, camera_idx2 = image_camera_indices.unbind(
         -1
     )  # (B,), (B,), (B,), (B,)
+
+    # debug: try triton kernel
+    # R_rel = triton_wrapper(
+    #     image_camera_indices=image_camera_indices,  # (B, 4)
+    #     R_w2c=R_w2c,  # (N, 3, 3)
+    #     t_w2c=t_w2c,  # (N, 3)
+    #     inv_focal_scale=inv_focal_scale,  # (C,)
+    #     W=W,  # (B, 9, 9)
+    # )  # (B, 3, 3)
 
     # ------------------------------------------------------------------ #
     # Layer-1: gather poses & relative rotation
