@@ -252,64 +252,6 @@ class Layer1(torch.autograd.Function):
         return None, None, d_R_w2c, d_t_w2c  # match inputs order
 
 
-# class Layer2(nn.Module):
-#     """Convert relative pose to an essential matrix."""
-#
-#     def forward(self, R_rel: torch.Tensor, t1: torch.Tensor, t2: torch.Tensor):
-#         # term1 = torch.cross(R_rel, t1[..., None, :], dim=-1)
-#         # term2 = torch.cross(t2[..., None], R_rel, dim=-2)
-#         t1_x = vector_to_skew_symmetric_matrix(t1)  # (B, 3, 3)
-#         t2_x = vector_to_skew_symmetric_matrix(t2)  # (B, 3, 3)
-#         term1 = R_rel @ t1_x  # (B, 3, 3)
-#         term2 = t2_x @ R_rel  # (B, 3, 3)
-#         E = term1 - term2  # (B, 3, 3)
-#         return E
-
-
-# class Layer2(torch.autograd.Function):
-#     @staticmethod
-#     def forward(ctx, R_rel: torch.Tensor, t1: torch.Tensor, t2: torch.Tensor):
-#         # term1 = torch.cross(R_rel, t1[..., None, :], dim=-1)
-#         # term2 = torch.cross(t2[..., None], R_rel, dim=-2)
-#         t1_x = vector_to_skew_symmetric_matrix(t1)  # (B, 3, 3)
-#         t2_x = vector_to_skew_symmetric_matrix(t2)  # (B, 3, 3)
-#         term1 = R_rel @ t1_x  # (B, 3, 3)
-#         term2 = t2_x @ R_rel  # (B, 3, 3)
-#         E = term1 - term2  # (B, 3, 3)
-#         ctx.save_for_backward(R_rel, t1, t2, t1_x, t2_x)
-#         return E
-#
-#     @staticmethod
-#     def backward(ctx, *grad_outputs):
-#         (d_E,) = grad_outputs
-#         R_rel, t1, t2, t1_x, t2_x = (
-#             ctx.saved_tensors
-#         )  # (B, 3, 3), (B, 3), (B, 3), (B, 3, 3), (B, 3, 3)
-#         # C=A @ B, then d_A = d_C @ B^T, d_B = A^T @ d_C
-#         d_R_rel = (
-#             d_E @ t1_x.transpose(-1, -2) - t2_x.transpose(-1, -2) @ d_E
-#         )  # (B, 3, 3)
-#         d_t1_x = R_rel.transpose(-1, -2) @ d_E  # (B, 3, 3)
-#         d_t2_x = -d_E @ R_rel.transpose(-1, -2)  # (B, 3, 3)
-#         d_t1 = torch.stack(
-#             [
-#                 d_t1_x[:, 2, 1] - d_t1_x[:, 1, 2],
-#                 d_t1_x[:, 0, 2] - d_t1_x[:, 2, 0],
-#                 d_t1_x[:, 1, 0] - d_t1_x[:, 0, 1],
-#             ],
-#             dim=-1,
-#         )  # (B, 3)
-#         d_t2 = torch.stack(
-#             [
-#                 d_t2_x[:, 2, 1] - d_t2_x[:, 1, 2],
-#                 d_t2_x[:, 0, 2] - d_t2_x[:, 2, 0],
-#                 d_t2_x[:, 1, 0] - d_t2_x[:, 0, 1],
-#             ],
-#             dim=-1,
-#         )  # (B, 3)
-#         return d_R_rel, d_t1, d_t2  # (B, 3, 3), (B, 3), (B, 3)
-
-
 class Layer2(torch.autograd.Function):
     @staticmethod
     def forward(ctx, R_rel: torch.Tensor, t1: torch.Tensor, t2: torch.Tensor):
@@ -347,134 +289,6 @@ class Layer2(torch.autograd.Function):
         return d_R_rel, d_t1, d_t2  # match inputs order
 
 
-# class Layer2_1(torch.autograd.Function):
-#     """
-#     Convert translation vectors t1, t2 → skew-symmetric matrices t1_x, t2_x.
-#     """
-#
-#     @staticmethod
-#     def forward(ctx, t1: torch.Tensor, t2: torch.Tensor):
-#         t1_x = vector_to_skew_symmetric_matrix(t1)  # (B, 3, 3)
-#         t2_x = vector_to_skew_symmetric_matrix(t2)  # (B, 3, 3)
-#         ctx.save_for_backward(t1, t2)  # needed only for size info
-#         return t1_x, t2_x
-#
-#     @staticmethod
-#     def backward(ctx, *grad_outputs):
-#         d_t1_x, d_t2_x = grad_outputs  # (B, 3, 3) each
-#
-#         # Map skew-matrix gradients back to vector form.
-#         def skew_grad_to_vec(d_tx: torch.Tensor) -> torch.Tensor:
-#             return torch.stack(
-#                 [
-#                     d_tx[:, 2, 1] - d_tx[:, 1, 2],
-#                     d_tx[:, 0, 2] - d_tx[:, 2, 0],
-#                     d_tx[:, 1, 0] - d_tx[:, 0, 1],
-#                 ],
-#                 dim=-1,
-#             )
-#
-#         d_t1 = skew_grad_to_vec(d_t1_x)  # (B, 3)
-#         d_t2 = skew_grad_to_vec(d_t2_x)  # (B, 3)
-#         return d_t1, d_t2  # match inputs order
-#
-#
-# class Layer2_2(torch.autograd.Function):
-#     """
-#     Compute the essential matrix E from R_rel, t1_x, t2_x.
-#
-#     Forward:
-#         E = R_rel @ t1_x − t2_x @ R_rel
-#     """
-#
-#     @staticmethod
-#     def forward(
-#         ctx, R_rel: torch.Tensor, t1_x: torch.Tensor, t2_x: torch.Tensor
-#     ) -> torch.Tensor:
-#         term1 = R_rel @ t1_x  # (B, 3, 3)
-#         term2 = t2_x @ R_rel  # (B, 3, 3)
-#         E = term1 - term2  # (B, 3, 3)
-#         ctx.save_for_backward(R_rel, t1_x, t2_x)
-#         return E
-#
-#     @staticmethod
-#     def backward(ctx, *grad_outputs):
-#         (d_E,) = grad_outputs
-#         R_rel, t1_x, t2_x = ctx.saved_tensors
-#
-#         # dE = R_rel @ t1_x − t2_x @ R_rel
-#         # Use d(A@B) rules:  dA = dE @ Bᵀ ;  dB = Aᵀ @ dE
-#         d_R_rel = d_E @ t1_x.transpose(-1, -2) - t2_x.transpose(-1, -2) @ d_E
-#         d_t1_x = R_rel.transpose(-1, -2) @ d_E
-#         d_t2_x = -d_E @ R_rel.transpose(-1, -2)
-#         return d_R_rel, d_t1_x, d_t2_x
-
-
-# class Layer2_1(nn.Module):
-#     """
-#     Module that converts translation vectors `t1`, `t2` to their
-#     skew-symmetric matrix forms `t1_x`, `t2_x`.
-#
-#     Forward Inputs
-#     --------------
-#     t1, t2 : torch.Tensor, each (B, 3)
-#
-#     Forward Outputs
-#     ---------------
-#     t1_x, t2_x : torch.Tensor, each (B, 3, 3)
-#     """
-#
-#     def forward(
-#         self, t1: torch.Tensor, t2: torch.Tensor
-#     ) -> tuple[torch.Tensor, torch.Tensor]:
-#         t1_x = vector_to_skew_symmetric_matrix(t1)
-#         t2_x = vector_to_skew_symmetric_matrix(t2)
-#         return t1_x, t2_x
-
-
-# class Layer2_2(nn.Module):
-#     """
-#     Module that computes the essential matrix
-#
-#         E = R_rel @ t1_x − t2_x @ R_rel
-#
-#     given a relative rotation `R_rel` and two skew-symmetric matrices.
-#
-#     Forward Inputs
-#     --------------
-#     R_rel : torch.Tensor, (B, 3, 3)
-#     t1_x  : torch.Tensor, (B, 3, 3)
-#     t2_x  : torch.Tensor, (B, 3, 3)
-#
-#     Forward Output
-#     --------------
-#     E : torch.Tensor, (B, 3, 3)
-#     """
-#
-#     def forward(
-#         self, R_rel: torch.Tensor, t1_x: torch.Tensor, t2_x: torch.Tensor
-#     ) -> torch.Tensor:
-#         return R_rel @ t1_x - t2_x @ R_rel
-
-
-# class Layer3(nn.Module):
-#     """Inject intrinsics (inverse focal scales) to get the fundamental matrix."""
-#
-#     def forward(
-#         self,
-#         essential: torch.Tensor,
-#         focal_scale: torch.Tensor,
-#         camera_idx: torch.Tensor,
-#         image_idx1: torch.Tensor,
-#         image_idx2: torch.Tensor,
-#     ):
-#         f1_inv = 1.0 / focal_scale[camera_idx[image_idx1]]  # (B,)
-#         f2_inv = 1.0 / focal_scale[camera_idx[image_idx2]]  # (B,)
-#
-#         K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)
-#         K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)
-#
-#         return K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B, 3, 3)
 class Layer3(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -550,12 +364,6 @@ class Layer3(torch.autograd.Function):
         return d_E, d_f, None, None, None
 
 
-# class Layer4(nn.Module):
-#     """Vectorise fundamental matrices and ℓ₂-normalise each row vector."""
-#
-#     def forward(self, fundamental: torch.Tensor) -> torch.Tensor:  # (B, 3, 3) → (B, 9)
-#         vec = fundamental.reshape(fundamental.shape[0], 9)  # (B, 9)
-#         return F.normalize(vec, p=2, dim=-1)  # (B, 9), unit length
 class Layer4(torch.autograd.Function):
     @staticmethod
     def forward(ctx, fundamental: torch.Tensor):
@@ -577,12 +385,6 @@ class Layer4(torch.autograd.Function):
         return d_fundamental
 
 
-# class Layer5(nn.Module):
-#     """Apply ½ vᵀ W v per sample and sum to a scalar."""
-#
-#     def forward(self, vec: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
-#         # vec: (B, 9);  W: (B, 9, 9)
-#         return 0.5 * torch.einsum("bi,bij,bj->b", vec, W, vec).sum()  # scalar
 class Layer5(torch.autograd.Function):
     @staticmethod
     def forward(ctx, vec: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
@@ -600,33 +402,6 @@ class Layer5(torch.autograd.Function):
             (W_vec.shape[0], 9, 9), device=W_vec.device, dtype=W_vec.dtype
         )  # (B, 9, 9)
         return d_vec, d_W  # (B, 9), (B, 9, 9)
-
-
-# class Layer4(torch.autograd.Function):
-#     """ℓ₂-normalise vec(F) and apply the quadratic form ½ vᵀ W v."""
-#
-#     @staticmethod
-#     def forward(ctx, fundamental: torch.Tensor, W: torch.Tensor):
-#         F_flat = fundamental.reshape(-1, 9)  # (B, 9)
-#         F_norm = F_flat.norm(p=2, dim=-1, keepdim=True) + 1e-8  # (B, 1)
-#         F_normalized = F_flat / F_norm  # (B, 9)
-#         W_F_normalized = torch.einsum("bij,bj->bi", W, F_normalized)  # (B, 9)
-#         loss = 0.5 * (F_normalized * W_F_normalized).sum()
-#         ctx.save_for_backward(F_flat, F_norm, W, W_F_normalized)
-#         return loss
-#
-#     @staticmethod
-#     def backward(ctx, *grad_outputs: torch.Tensor):
-#         F_flat, F_norm, W, W_F_normalized = ctx.saved_tensors
-#         (d_loss,) = grad_outputs
-#         d_F_normalized = d_loss * W_F_normalized  # (B, 9)
-#         d_F_flat = (
-#             d_F_normalized
-#             - (F_flat * d_F_normalized).sum(dim=-1, keepdim=True) * F_flat
-#         ) / F_norm  # (B, 9)
-#         d_fundamental = d_F_flat.reshape(-1, 3, 3)  # (B, 3, 3)
-#         d_W = torch.zeros_like(W)  # (B, 9, 9) not used anywhere
-#         return d_fundamental, d_W  # (B, 3, 3), (B, 9, 9)
 
 
 class ComputationModule(nn.Module):
