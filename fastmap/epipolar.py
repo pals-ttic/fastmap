@@ -218,11 +218,63 @@ class Layer3(nn.Module):
 
 
 class Layer4(nn.Module):
-    """ℓ₂-normalise vec(F) and apply the quadratic form ½ vᵀ W v."""
+    """Vectorise fundamental matrices and ℓ₂-normalise each row vector."""
 
-    def forward(self, fundamental: torch.Tensor, W: torch.Tensor):
-        vec = F.normalize(fundamental.reshape(-1, 9), p=2, dim=-1)  # (B, 9)
-        return 0.5 * torch.einsum("bi,bij,bj->b", vec, W, vec).sum()
+    def forward(self, fundamental: torch.Tensor) -> torch.Tensor:  # (B, 3, 3) → (B, 9)
+        vec = fundamental.reshape(fundamental.shape[0], 9)  # (B, 9)
+        return F.normalize(vec, p=2, dim=-1)  # (B, 9), unit length
+
+
+# class Layer5(nn.Module):
+#     """Apply ½ vᵀ W v per sample and sum to a scalar."""
+#
+#     def forward(self, vec: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
+#         # vec: (B, 9);  W: (B, 9, 9)
+#         return 0.5 * torch.einsum("bi,bij,bj->b", vec, W, vec).sum()  # scalar
+class Layer5(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, vec: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
+        W_vec = torch.einsum("bij,bj->bi", W, vec)  # (B, 9)
+        ctx.save_for_backward(W_vec)  # (B, 9)
+        loss = 0.5 * (vec * W_vec).sum()  # scalar
+        return loss
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        (d_loss,) = grad_outputs
+        (W_vec,) = ctx.saved_tensors  # (B, 9)
+        d_vec = W_vec * d_loss  # (B, 9)
+        d_W = torch.zeros(
+            (W_vec.shape[0], 9, 9), device=W_vec.device, dtype=W_vec.dtype
+        )  # (B, 9, 9)
+        return d_vec, d_W  # (B, 9), (B, 9, 9)
+
+
+# class Layer4(torch.autograd.Function):
+#     """ℓ₂-normalise vec(F) and apply the quadratic form ½ vᵀ W v."""
+#
+#     @staticmethod
+#     def forward(ctx, fundamental: torch.Tensor, W: torch.Tensor):
+#         F_flat = fundamental.reshape(-1, 9)  # (B, 9)
+#         F_norm = F_flat.norm(p=2, dim=-1, keepdim=True) + 1e-8  # (B, 1)
+#         F_normalized = F_flat / F_norm  # (B, 9)
+#         W_F_normalized = torch.einsum("bij,bj->bi", W, F_normalized)  # (B, 9)
+#         loss = 0.5 * (F_normalized * W_F_normalized).sum()
+#         ctx.save_for_backward(F_flat, F_norm, W, W_F_normalized)
+#         return loss
+#
+#     @staticmethod
+#     def backward(ctx, *grad_outputs: torch.Tensor):
+#         F_flat, F_norm, W, W_F_normalized = ctx.saved_tensors
+#         (d_loss,) = grad_outputs
+#         d_F_normalized = d_loss * W_F_normalized  # (B, 9)
+#         d_F_flat = (
+#             d_F_normalized
+#             - (F_flat * d_F_normalized).sum(dim=-1, keepdim=True) * F_flat
+#         ) / F_norm  # (B, 9)
+#         d_fundamental = d_F_flat.reshape(-1, 3, 3)  # (B, 3, 3)
+#         d_W = torch.zeros_like(W)  # (B, 9, 9) not used anywhere
+#         return d_fundamental, d_W  # (B, 3, 3), (B, 9, 9)
 
 
 class ComputationModule(nn.Module):
@@ -249,6 +301,7 @@ class ComputationModule(nn.Module):
         self.layer2 = Layer2()
         self.layer3 = Layer3()
         self.layer4 = Layer4()
+        self.layer5 = Layer5.apply
 
     def forward(
         self,
@@ -265,7 +318,8 @@ class ComputationModule(nn.Module):
         fundamental = self.layer3(
             essential, focal_scale, camera_idx, image_idx1, image_idx2
         )
-        loss = self.layer4(fundamental, W)
+        fundamental = self.layer4(fundamental)  # (B, 9)
+        loss = self.layer5(fundamental, W)
         return loss
 
 
