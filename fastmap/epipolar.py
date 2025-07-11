@@ -197,11 +197,28 @@ class Layer2(nn.Module):
         return term1 - term2  # (B, 3, 3)
 
 
-class Layer3(nn.Module):
-    """Inject intrinsics (inverse focal scales) to get the fundamental matrix."""
-
+# class Layer3(nn.Module):
+#     """Inject intrinsics (inverse focal scales) to get the fundamental matrix."""
+#
+#     def forward(
+#         self,
+#         essential: torch.Tensor,
+#         focal_scale: torch.Tensor,
+#         camera_idx: torch.Tensor,
+#         image_idx1: torch.Tensor,
+#         image_idx2: torch.Tensor,
+#     ):
+#         f1_inv = 1.0 / focal_scale[camera_idx[image_idx1]]  # (B,)
+#         f2_inv = 1.0 / focal_scale[camera_idx[image_idx2]]  # (B,)
+#
+#         K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)
+#         K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)
+#
+#         return K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B, 3, 3)
+class Layer3(torch.autograd.Function):
+    @staticmethod
     def forward(
-        self,
+        ctx,
         essential: torch.Tensor,
         focal_scale: torch.Tensor,
         camera_idx: torch.Tensor,
@@ -214,7 +231,63 @@ class Layer3(nn.Module):
         K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)
         K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)
 
-        return K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B, 3, 3)
+        F = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B, 3, 3)
+        ctx.save_for_backward(
+            essential,
+            f1_inv,
+            f2_inv,
+            K1_inv,
+            K2_inv,
+            camera_idx,
+            image_idx1,
+            image_idx2,
+            focal_scale,
+        )
+        return F
+
+    @staticmethod
+    def backward(
+        ctx,
+        *grad_outputs,
+    ):
+        (d_F,) = grad_outputs  # (B, 3, 3)
+        (
+            E,
+            f1_inv,
+            f2_inv,
+            K1_inv,
+            K2_inv,
+            camera_idx,
+            image_idx1,
+            image_idx2,
+            focal_scale,
+        ) = ctx.saved_tensors
+        d_E = d_F * K2_inv[:, :, None] * K1_inv[:, None, :]  # (B, 3, 3)
+        d_K1_inv = d_F * E * K2_inv[:, :, None]  # (B, 3, 3)
+        d_K2_inv = d_F * E * K1_inv[:, None, :]  # (B, 3, 3)
+        d_f1_inv = d_K1_inv[:, :, :2].sum(dim=-1).sum(dim=-1)  # (B,)
+        d_f2_inv = d_K2_inv[:, :2, :].sum(dim=-1).sum(dim=-1)  # (B,)
+        d_f1 = -d_f1_inv / f1_inv**2  # (B,)
+        d_f2 = -d_f2_inv / f2_inv**2  # (B,)
+        d_f = torch.zeros(
+            len(focal_scale), device=K1_inv.device, dtype=K1_inv.dtype
+        )  # (num_cameras,)
+        d_f.scatter_reduce_(
+            dim=0,
+            index=camera_idx[image_idx1],
+            src=d_f1,
+            reduce="sum",
+            include_self=True,
+        )
+        d_f.scatter_reduce_(
+            dim=0,
+            index=camera_idx[image_idx2],
+            src=d_f2,
+            reduce="sum",
+            include_self=True,
+        )
+
+        return d_E, d_f, None, None, None
 
 
 # class Layer4(nn.Module):
@@ -318,7 +391,7 @@ class ComputationModule(nn.Module):
         super().__init__()
         self.layer1 = Layer1()
         self.layer2 = Layer2()
-        self.layer3 = Layer3()
+        self.layer3 = Layer3.apply
         self.layer4 = Layer4.apply
         self.layer5 = Layer5.apply
 
