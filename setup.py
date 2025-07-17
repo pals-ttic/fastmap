@@ -1,10 +1,24 @@
+import subprocess
 from pathlib import Path
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-PACKAGE_NAME='fastmap'
+PACKAGE_NAME = "fastmap"
 
 this_dir = Path(__file__).parent
+
+
+class BuildExtWithCompDb(BuildExtension):
+    def run(self):
+        super().run()  # regular build
+        build_dir = Path(self.build_temp)  # e.g. build/temp.linux‑…
+        ninja_file = build_dir / "build.ninja"
+        if ninja_file.exists():
+            compdb = subprocess.check_output(
+                ["ninja", "-C", str(build_dir), "-t", "compdb"]
+            )
+            (Path.cwd() / "compile_commands.json").write_bytes(compdb)
+
 
 setup(
     name=PACKAGE_NAME,
@@ -25,5 +39,5 @@ setup(
             },
         )
     ],
-    cmdclass={"build_ext": BuildExtension.with_options(no_python_abi_suffix=True)},
+    cmdclass={"build_ext": BuildExtWithCompDb.with_options(no_python_abi_suffix=True)},
 )

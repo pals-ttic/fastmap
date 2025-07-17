@@ -15,7 +15,6 @@ __global__ void vector_add_kernel(const T *__restrict__ A,
 }
 
 // Explicit instantiations so the symbols exist in the fat-bin.
-// (float and double are enough for most demos)
 template __global__ void vector_add_kernel<float>(const float *, const float *,
                                                   float *, int64_t);
 template __global__ void
