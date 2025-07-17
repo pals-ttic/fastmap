@@ -25,7 +25,7 @@ setup(
     version="0.1",
     ext_modules=[
         CUDAExtension(
-            name=f"{PACKAGE_NAME}.vector_add_ext",
+            name=f"{PACKAGE_NAME}.cuda.vector_add_ext",
             sources=[
                 str(this_dir / "cuda" / "epipolar_adjustment.cu"),
             ],
