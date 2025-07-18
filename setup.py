@@ -4,8 +4,8 @@ from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 PACKAGE_NAME = "fastmap"
-
-this_dir = Path(__file__).parent
+THIS_DIR = Path(__file__).parent
+SOURCE_DIR = THIS_DIR / "cuda"
 
 
 class BuildExtWithCompDb(BuildExtension):
@@ -25,9 +25,10 @@ setup(
     version="0.1",
     ext_modules=[
         CUDAExtension(
-            name=f"{PACKAGE_NAME}.cuda.vector_add_ext",
+            name=f"{PACKAGE_NAME}.cuda",
             sources=[
-                str(this_dir / "cuda" / "epipolar_adjustment.cu"),
+                str(SOURCE_DIR / "epipolar_adjustment.cu"),
+                str(SOURCE_DIR / "interface.cc"),
             ],
             extra_compile_args={
                 "cxx": ["-O3"],
