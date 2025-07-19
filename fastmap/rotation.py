@@ -24,7 +24,7 @@ def compute_rotation_angle_error(R1, R2, clamp_value=1.0, use_degree=True):
         angle: torch.Tensor, float, shape=(...), rotation angle error
     """
     # Compute the relative rotation matrix
-    R = R1.transpose(-1, -2) @ R2
+    R = R1.transpose(-1, -2).contiguous() @ R2
 
     # Compute the trace of the relative rotation matrix
     trace = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]
