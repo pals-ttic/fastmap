@@ -308,7 +308,7 @@ class ComputeGradientModule(nn.Module):
 class ComputeGradient:
     def __init__(self):
         self.module = ComputeGradientModule().eval()
-        self.module = torch.compile(self.module, mode="max-autotune")
+        # self.module = torch.compile(self.module, mode="max-autotune")
         # self.module = torch.compile(self.module, mode="reduce-overhead")
 
     def __call__(self, image_camera_indices, R_w2c, t_w2c, inv_focal_scale, W):
