@@ -589,40 +589,36 @@ def _compute_fundamental_matrix(
     R_w2c2 = torch.index_select(
         input=R_w2c, dim=0, index=image_idx2
     )  # (num_image_pairs, 3, 3)
-    R = R_w2c2 @ R_w2c1.transpose(-1, -2)  # (num_image_pairs, 3, 3)
+    R_rel = R_w2c2 @ R_w2c1.transpose(-1, -2).contiguous()  # (num_image_pairs, 3, 3)
     del R_w2c, R_w2c1, R_w2c2
 
     # get relative translation
-    t_w2c1 = torch.index_select(
+    t1 = torch.index_select(
         input=t_w2c, dim=0, index=image_idx1
     )  # (num_image_pairs, 3)
-    t_w2c2 = torch.index_select(
+    t2 = torch.index_select(
         input=t_w2c, dim=0, index=image_idx2
     )  # (num_image_pairs, 3)
     del t_w2c
 
-    # compute essential matrix
-    essential = torch.cross(R, t_w2c1[..., None, :], dim=-1) - torch.cross(
-        t_w2c2[..., None], R, dim=-2
-    )
+    t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
+    t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
+    essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
 
-    # normalize essential matrix
-    essential = normalize_matrix(essential)  # (num_image_pairs, 3, 3)
+    camera_idx1 = camera_idx[image_idx1]  # (B,)
+    camera_idx2 = camera_idx[image_idx2]  # (B,)
+    f1_inv = 1.0 / focal_scale[camera_idx1]  # (B,)
+    f2_inv = 1.0 / focal_scale[camera_idx2]  # (B,)
+    K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)  # (B,3)
+    K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)  # (B,3)
+    fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
 
-    # compute fundamental matrix
-    focal_scale1_inv = 1.0 / focal_scale[camera_idx[image_idx1]]  # (num_image_pairs,)
-    focal_scale2_inv = 1.0 / focal_scale[camera_idx[image_idx2]]  # (num_image_pairs,)
-    K1_inv_diag = torch.stack(
-        [focal_scale1_inv, focal_scale1_inv, torch.ones_like(focal_scale1_inv)],
-        dim=-1,
-    )  # (num_image_pairs, 3)
-    K2_inv_diag = torch.stack(
-        [focal_scale2_inv, focal_scale2_inv, torch.ones_like(focal_scale2_inv)],
-        dim=-1,
-    )  # (num_image_pairs, 3)
-    fundamental = (
-        K2_inv_diag[:, :, None] * essential * K1_inv_diag[:, None, :]
-    )  # (num_image_pairs, 3, 3)
+    F_flat = fundamental.reshape(-1, 9)  # (B,9)
+    F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
+    F_normalised = F_flat / F_norm  # (B,9)
+
+    # reshape to (num_image_pairs, 3, 3)
+    fundamental = F_normalised.view(-1, 3, 3)  # (num_image_pairs, 3, 3)
 
     # return
     return fundamental
