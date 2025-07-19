@@ -163,90 +163,6 @@ def quadratic_form(
     return W
 
 
-# @triton.jit
-# def triton_kernel(
-#     out_R_rel_ptr,
-#     image_camera_indices_ptr,
-#     R_w2c_ptr,
-#     t_w2c_ptr,
-#     inv_focal_scale_ptr,
-#     num_rows,
-# ):
-#     # assume all the tensors to be contiguous
-#     # starting row of the program
-#     row_start = tl.program_id(0)
-#     row_step = tl.num_programs(0)
-#     for row_idx in tl.range(row_start, num_rows, row_step, num_stages=0):  # type: ignore
-#         # load image and camera indices
-#         idx_row_start_ptr = image_camera_indices_ptr + row_idx * 4  # long ptr
-#         image_idx1_ptr = idx_row_start_ptr + 0  # long ptr
-#         image_idx2_ptr = idx_row_start_ptr + 1  # long ptr
-#         camera_idx1_ptr = idx_row_start_ptr + 2  # long ptr
-#         camera_idx2_ptr = idx_row_start_ptr + 3  # long ptr
-#         image_idx1 = tl.load(image_idx1_ptr)  # long
-#         image_idx2 = tl.load(image_idx2_ptr)  # long
-#         camera_idx1 = tl.load(camera_idx1_ptr)  # long
-#         camera_idx2 = tl.load(camera_idx2_ptr)  # long
-#
-#         # load R_w2c, t_w2c (note that arange only works for power of 2)
-#         R_row_offset = tl.arange(0, 4)[:, None]  # long (4, 1)
-#         R_col_offset = tl.arange(0, 4)[None, :]  # long (1, 4)
-#         R_offset = R_row_offset * 3 + R_col_offset  # long (4, 4)
-#         R_mask = (R_col_offset < 3) & (R_row_offset < 3)  # long (4, 4)
-#         t_offset = tl.arange(0, 4)  # long (4,)
-#         t_mask = t_offset < 3  # long (4,)
-#         R1_ptrs = R_w2c_ptr + image_idx1 * 9 + R_offset  # float (4, 4)
-#         R2_ptrs = R_w2c_ptr + image_idx2 * 9 + R_offset  # float (4, 4)
-#         t1_ptrs = t_w2c_ptr + image_idx1 * 3 + t_offset  # float (4,)
-#         t2_ptrs = t_w2c_ptr + image_idx2 * 3 + t_offset  # float (4,)
-#         R1 = tl.load(R1_ptrs, mask=R_mask, other=0.0)  # float (4, 4)
-#         R2 = tl.load(R2_ptrs, mask=R_mask, other=0.0)  # float (4, 4)
-#         t1 = tl.load(t1_ptrs, mask=t_mask, other=0.0)  # float (4,)
-#         t2 = tl.load(t2_ptrs, mask=t_mask, other=0.0)  # float (4,)
-#
-#         # compute relative rotation
-#         R_rel = tl.dot(R2, tl.trans(R1, 0, 1))  # float (4, 4)
-#
-#         # store
-#         R_rel_ptrs = out_R_rel_ptr + row_idx * 9 + R_offset  # float (4, 4)
-#         tl.store(R_rel_ptrs, R_rel, mask=R_mask)
-#
-#
-# def triton_wrapper(
-#     image_camera_indices: torch.Tensor,
-#     R_w2c: torch.Tensor,
-#     t_w2c: torch.Tensor,
-#     inv_focal_scale: torch.Tensor,
-#     W: torch.Tensor,
-# ):
-#     # get information
-#     device, dtype = R_w2c.device, R_w2c.dtype
-#     num_image_pairs = image_camera_indices.shape[0]
-#     num_rows = num_image_pairs
-#
-#     # allocate output tensors
-#     R_rel = torch.zeros(
-#         (num_image_pairs, 3, 3), device=device, dtype=dtype
-#     )  # (num_image_pairs, 3, 3)
-#
-#     # hyperparameters to tune
-#     num_warps = 1  # debug: where is this used?
-#     num_programs = min(num_rows, 4096)  # number of programs to launch
-#
-#     # launch
-#     triton_kernel[(num_programs, 1, 1)](
-#         R_rel,
-#         image_camera_indices,
-#         R_w2c,
-#         t_w2c,
-#         inv_focal_scale,
-#         num_rows,
-#     )
-#
-#     # return the result
-#     return R_rel
-
-
 def compute_gradients(
     image_camera_indices: torch.Tensor,  # long (B, 4)
     R_w2c: torch.Tensor,  # float (N, 3, 3)
@@ -266,15 +182,6 @@ def compute_gradients(
         -1
     )  # (B,), (B,), (B,), (B,)
 
-    # debug: try triton kernel
-    # R_rel = triton_wrapper(
-    #     image_camera_indices=image_camera_indices,  # (B, 4)
-    #     R_w2c=R_w2c,  # (N, 3, 3)
-    #     t_w2c=t_w2c,  # (N, 3)
-    #     inv_focal_scale=inv_focal_scale,  # (C,)
-    #     W=W,  # (B, 9, 9)
-    # )  # (B, 3, 3)
-
     # ------------------------------------------------------------------ #
     # Layer-1: gather poses & relative rotation
     # ------------------------------------------------------------------ #
@@ -282,7 +189,7 @@ def compute_gradients(
     R2 = R_w2c.index_select(0, image_idx2)  # (B,3,3)
     t1 = t_w2c.index_select(0, image_idx1)  # (B,3)
     t2 = t_w2c.index_select(0, image_idx2)  # (B,3)
-    R_rel = R2 @ R1.transpose(-1, -2)  # (B,3,3)
+    R_rel = R2 @ R1.transpose(-1, -2).contiguous()  # (B,3,3)
 
     # ------------------------------------------------------------------ #
     # Layer-2: essential matrix
@@ -346,9 +253,12 @@ def compute_gradients(
     # -------------------------------------------------------------- #
     # ⇢ Layer-2
     # -------------------------------------------------------------- #
-    d_R_rel = d_E @ t1_x.transpose(-1, -2) - t2_x.transpose(-1, -2) @ d_E  # (B,3,3)
-    d_t1_x = R_rel.transpose(-1, -2) @ d_E  # (B,3,3)
-    d_t2_x = -d_E @ R_rel.transpose(-1, -2)  # (B,3,3)
+    d_R_rel = (
+        d_E @ t1_x.transpose(-1, -2).contiguous()
+        - t2_x.transpose(-1, -2).contiguous() @ d_E
+    )  # (B,3,3)
+    d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
+    d_t2_x = -d_E @ R_rel.transpose(-1, -2).contiguous()  # (B,3,3)
 
     d_t1 = torch.stack(  # (B,3)
         (
@@ -370,7 +280,7 @@ def compute_gradients(
     # -------------------------------------------------------------- #
     # ⇢ Layer-1
     # -------------------------------------------------------------- #
-    d_R1 = d_R_rel.transpose(-1, -2) @ R2  # (B,3,3)
+    d_R1 = d_R_rel.transpose(-1, -2).contiguous() @ R2  # (B,3,3)
     d_R2 = d_R_rel @ R1  # (B,3,3)
 
     N = len(R_w2c)  # number of images
