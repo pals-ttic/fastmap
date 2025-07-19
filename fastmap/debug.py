@@ -1,3 +1,4 @@
+import time
 from loguru import logger
 import prettytable
 import numpy as np
@@ -5,6 +6,22 @@ import torch
 
 from fastmap.container import ColmapModel, Images, Cameras
 from fastmap.utils import quantile_of_big_tensor
+
+
+class DebugTimer:
+    def __init__(self, name: str):
+        self.name = name
+
+    def __enter__(self):
+        torch.cuda.synchronize()  # ensure all previous operations are done
+        self.start = time.perf_counter()
+        return self  # allows use of `as` if needed
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        torch.cuda.synchronize()  # ensure all previous operations are done
+        end = time.perf_counter()
+        elapsed = end - self.start
+        logger.debug(f"[{self.name}] Elapsed time: {elapsed:.6f} seconds")
 
 
 def pairwise_rotation_angle_error(

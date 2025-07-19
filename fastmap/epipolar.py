@@ -587,63 +587,43 @@ def loop(
     # computation_module = ComputationModule()
 
     ##### Optimization loop #####
+    from fastmap.debug import DebugTimer  # jiahao debug
+
     with torch.enable_grad():
         for iter_idx in range(1000000000):
-            (
-                R_w2c,
-                t_w2c,
-                _,  # focal_scale
-                inv_focal_scale,
-            ) = params()  # (num_images, 3, 3), (num_images, 3), (num_cameras,)
+            with DebugTimer("jiahao debug params forward"):
+                (
+                    R_w2c,
+                    t_w2c,
+                    _,  # focal_scale
+                    inv_focal_scale,
+                ) = params()  # (num_images, 3, 3), (num_images, 3), (num_cameras,)
 
             # compute the loss
-            # loss = computation_module(
-            #     image_idx1=image_idx1,
-            #     image_idx2=image_idx2,
-            #     R_w2c=R_w2c,
-            #     t_w2c=t_w2c,
-            #     focal_scale=focal_scale,
-            #     camera_idx=camera_idx,
-            #     W=W,
-            # )
-            loss, d_R_w2c, d_t_w2c, d_inv_focal_scale = compute_gradients(
-                image_camera_indices=image_camera_indices,  # (num_image_pairs, 4)
-                R_w2c=R_w2c,
-                t_w2c=t_w2c,
-                inv_focal_scale=inv_focal_scale,  # (num_cameras,)
-                W=W,
-            )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
+            with DebugTimer("jiahao debug compute gradients"):
+                loss, d_R_w2c, d_t_w2c, d_inv_focal_scale = compute_gradients(
+                    image_camera_indices=image_camera_indices,  # (num_image_pairs, 4)
+                    R_w2c=R_w2c,
+                    t_w2c=t_w2c,
+                    inv_focal_scale=inv_focal_scale,  # (num_cameras,)
+                    W=W,
+                )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
 
             # backprop
-            optimizer.zero_grad()
+            with DebugTimer("jiahao debug zero_grad"):
+                optimizer.zero_grad()
             # loss.backward()
 
             # backward
-            torch.autograd.backward(
-                tensors=[R_w2c, t_w2c, inv_focal_scale],
-                grad_tensors=[d_R_w2c, d_t_w2c, d_inv_focal_scale],
-            )
+            with DebugTimer("jiahao debug backward"):
+                torch.autograd.backward(
+                    tensors=[R_w2c, t_w2c, inv_focal_scale],
+                    grad_tensors=[d_R_w2c, d_t_w2c, d_inv_focal_scale],
+                )
 
             # step
-            optimizer.step()
-
-            # # compute the fundamental matrix
-            # fundamental = _compute_fundamental_matrix(
-            #     image_idx1=image_idx1,
-            #     image_idx2=image_idx2,
-            #     R_w2c=R_w2c,
-            #     t_w2c=t_w2c,
-            #     focal_scale=focal_scale,
-            #     camera_idx=camera_idx,
-            # )  # (num_image_pairs, 3, 3)
-            #
-            # # flatten the fundamental matrix
-            # fundamental = fundamental.reshape(
-            #     num_image_pairs, 9
-            # )  # (num_image_pairs, 9)
-            #
-            # # compute the loss
-            # loss = 0.5 * torch.einsum("bi,bij,bj->b", fundamental, W, fundamental).sum()
+            with DebugTimer("jiahao debug optimizer step"):
+                optimizer.step()
 
             # check convergence
             moving_loss, if_converged = convergence_manager.step(
@@ -660,6 +640,7 @@ def loop(
                 logger.info(
                     f"[Iter {iter_idx} ({precision})] loss={loss.item():.8f}, moving_loss={moving_loss:.8f}"
                 )
+            logger.debug("jiahao debug ---------------------")
 
     ##### Get the results and convert to the original dtype #####
     (
