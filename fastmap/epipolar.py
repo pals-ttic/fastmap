@@ -13,6 +13,7 @@ from fastmap.utils import (
     vector_to_skew_symmetric_matrix,
 )
 from fastmap.utils import ConvergenceManager
+from fastmap.debug import DebugTimer  # jiahao debug
 
 
 class EpipolarAdjustmentParameters(nn.Module):
@@ -185,40 +186,49 @@ def compute_gradients(
     # ------------------------------------------------------------------ #
     # Layer-1: gather poses & relative rotation
     # ------------------------------------------------------------------ #
-    R1 = R_w2c.index_select(0, image_idx1)  # (B,3,3)
-    R2 = R_w2c.index_select(0, image_idx2)  # (B,3,3)
-    t1 = t_w2c.index_select(0, image_idx1)  # (B,3)
-    t2 = t_w2c.index_select(0, image_idx2)  # (B,3)
-    R_rel = R2 @ R1.transpose(-1, -2).contiguous()  # (B,3,3)
+    with DebugTimer("---jiahao debug gather poses"):
+        R1 = R_w2c.index_select(0, image_idx1)  # (B,3,3)
+        R2 = R_w2c.index_select(0, image_idx2)  # (B,3,3)
+        t1 = t_w2c.index_select(0, image_idx1)  # (B,3)
+        t2 = t_w2c.index_select(0, image_idx2)  # (B,3)
+    with DebugTimer("---jiahao debug relative rotation"):
+        R_rel = R2 @ R1.transpose(-1, -2).contiguous()  # (B,3,3)
 
     # ------------------------------------------------------------------ #
     # Layer-2: essential matrix
     # ------------------------------------------------------------------ #
-    t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
-    t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
-    essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
+    with DebugTimer("---jiahao debug vector to skew symmetric matrix"):
+        t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
+        t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
+    with DebugTimer("---jiahao debug essential matrix"):
+        essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
 
     # ------------------------------------------------------------------ #
     # Layer-3: fundamental matrix (unnormalised)
     # ------------------------------------------------------------------ #
-    f1_inv = inv_focal_scale[camera_idx1]  # (B,)
-    f2_inv = inv_focal_scale[camera_idx2]  # (B,)
-    K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)  # (B,3)
-    K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)  # (B,3)
-    fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
+    with DebugTimer("---jiahao debug gather focal scales"):
+        f1_inv = inv_focal_scale[camera_idx1]  # (B,)
+        f2_inv = inv_focal_scale[camera_idx2]  # (B,)
+    with DebugTimer("---jiahao debug K1_inv and K2_inv"):
+        K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)  # (B,3)
+        K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)  # (B,3)
+    with DebugTimer("---jiahao debug fundamental matrix"):
+        fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
 
     # ------------------------------------------------------------------ #
     # Layer-4: ℓ2-normalise the 9-vector
     # ------------------------------------------------------------------ #
-    F_flat = fundamental.reshape(-1, 9)  # (B,9)
-    F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
-    F_normalised = F_flat / F_norm  # (B,9)
+    with DebugTimer("---jiahao debug flatten and normalise fundamental matrix"):
+        F_flat = fundamental.reshape(-1, 9)  # (B,9)
+        F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
+        F_normalised = F_flat / F_norm  # (B,9)
 
     # ------------------------------------------------------------------ #
     # Layer-5: quadratic loss
     # ------------------------------------------------------------------ #
-    W_vec = torch.einsum("bij,bj->bi", W, F_normalised)  # (B,9)
-    loss = 0.5 * (F_normalised * W_vec).sum()  # scalar
+    with DebugTimer("---jiahao debug compute loss"):
+        W_vec = torch.einsum("bij,bj->bi", W, F_normalised)  # (B,9)
+        loss = 0.5 * (F_normalised * W_vec).sum()  # scalar
 
     # -------------------------------------------------------------- #
     # ⇢ Layer-5
@@ -228,103 +238,113 @@ def compute_gradients(
     # -------------------------------------------------------------- #
     # ⇢ Layer-4
     # -------------------------------------------------------------- #
-    d_F_flat = (
-        d_vec - (F_normalised * d_vec).sum(dim=-1, keepdim=True) * F_normalised
-    ) / F_norm  # (B,9)
-    d_F = d_F_flat.view(-1, 3, 3)  # (B,3,3)
+    with DebugTimer("---jiahao debug compute d_F_flat"):
+        d_F_flat = (
+            d_vec - (F_normalised * d_vec).sum(dim=-1, keepdim=True) * F_normalised
+        ) / F_norm  # (B,9)
+        d_F = d_F_flat.view(-1, 3, 3)  # (B,3,3)
 
     # -------------------------------------------------------------- #
     # ⇢ Layer-3
     # -------------------------------------------------------------- #
-    d_E = d_F * K2_inv[:, :, None] * K1_inv[:, None, :]  # (B,3,3)
-    d_K1_inv = d_F * essential * K2_inv[:, :, None]  # (B,3,3)
-    d_K2_inv = d_F * essential * K1_inv[:, None, :]  # (B,3,3)
+    with DebugTimer("---jiahao debug compute d_essential"):
+        d_E = d_F * K2_inv[:, :, None] * K1_inv[:, None, :]  # (B,3,3)
+        d_K1_inv = d_F * essential * K2_inv[:, :, None]  # (B,3,3)
+        d_K2_inv = d_F * essential * K1_inv[:, None, :]  # (B,3,3)
 
-    d_f1_inv = d_K1_inv[:, :, :2].sum((-1, -2))  # (B,)
-    d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
+    with DebugTimer("---jiahao debug compute d_f1_inv and d_f2_inv"):
+        d_f1_inv = d_K1_inv[:, :, :2].sum((-1, -2))  # (B,)
+        d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
 
-    num_cam = inv_focal_scale.shape[0]
+    with DebugTimer("---jiahao debug compute d_f_inv"):
+        num_cam = inv_focal_scale.shape[0]
 
-    if num_cam == 1:
-        # If there is only one camera, we can directly sum the gradients
-        d_f_inv = d_f1_inv.sum() + d_f2_inv.sum()
-        d_f_inv = d_f_inv.view(1)  # (1,)
-    else:
-        d_f_inv = torch.zeros(
-            (num_cam,), device=inv_focal_scale.device, dtype=inv_focal_scale.dtype
-        )  # (C,)
-        d_f_inv.scatter_reduce_(
-            0, camera_idx1, d_f1_inv, reduce="sum", include_self=True
-        )
-        d_f_inv.scatter_reduce_(
-            0, camera_idx2, d_f2_inv, reduce="sum", include_self=True
-        )
+        if num_cam == 1:
+            # If there is only one camera, we can directly sum the gradients
+            d_f_inv = d_f1_inv.sum() + d_f2_inv.sum()
+            d_f_inv = d_f_inv.view(1)  # (1,)
+        else:
+            d_f_inv = torch.zeros(
+                (num_cam,), device=inv_focal_scale.device, dtype=inv_focal_scale.dtype
+            )  # (C,)
+            d_f_inv.scatter_reduce_(
+                0, camera_idx1, d_f1_inv, reduce="sum", include_self=True
+            )
+            d_f_inv.scatter_reduce_(
+                0, camera_idx2, d_f2_inv, reduce="sum", include_self=True
+            )
 
     # -------------------------------------------------------------- #
     # ⇢ Layer-2
     # -------------------------------------------------------------- #
-    d_R_rel = (
-        d_E @ t1_x.transpose(-1, -2).contiguous()
-        - t2_x.transpose(-1, -2).contiguous() @ d_E
-    )  # (B,3,3)
-    d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
-    d_t2_x = -d_E @ R_rel.transpose(-1, -2).contiguous()  # (B,3,3)
+    with DebugTimer("---jiahao debug compute d_t1_x and d_t2_x"):
+        d_R_rel = (
+            d_E @ t1_x.transpose(-1, -2).contiguous()
+            - t2_x.transpose(-1, -2).contiguous() @ d_E
+        )  # (B,3,3)
+        d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
+        d_t2_x = -d_E @ R_rel.transpose(-1, -2).contiguous()  # (B,3,3)
 
-    d_t1 = torch.stack(  # (B,3)
-        (
-            d_t1_x[:, 2, 1] - d_t1_x[:, 1, 2],
-            d_t1_x[:, 0, 2] - d_t1_x[:, 2, 0],
-            d_t1_x[:, 1, 0] - d_t1_x[:, 0, 1],
-        ),
-        dim=-1,
-    )
-    d_t2 = torch.stack(  # (B,3)
-        (
-            d_t2_x[:, 2, 1] - d_t2_x[:, 1, 2],
-            d_t2_x[:, 0, 2] - d_t2_x[:, 2, 0],
-            d_t2_x[:, 1, 0] - d_t2_x[:, 0, 1],
-        ),
-        dim=-1,
-    )
+    with DebugTimer("---jiahao debug compute d_t1 and d_t2"):
+        d_t1 = torch.stack(  # (B,3)
+            (
+                d_t1_x[:, 2, 1] - d_t1_x[:, 1, 2],
+                d_t1_x[:, 0, 2] - d_t1_x[:, 2, 0],
+                d_t1_x[:, 1, 0] - d_t1_x[:, 0, 1],
+            ),
+            dim=-1,
+        )
+        d_t2 = torch.stack(  # (B,3)
+            (
+                d_t2_x[:, 2, 1] - d_t2_x[:, 1, 2],
+                d_t2_x[:, 0, 2] - d_t2_x[:, 2, 0],
+                d_t2_x[:, 1, 0] - d_t2_x[:, 0, 1],
+            ),
+            dim=-1,
+        )
 
     # -------------------------------------------------------------- #
     # ⇢ Layer-1
     # -------------------------------------------------------------- #
-    d_R1 = d_R_rel.transpose(-1, -2).contiguous() @ R2  # (B,3,3)
-    d_R2 = d_R_rel @ R1  # (B,3,3)
+    with DebugTimer("---jiahao debug compute d_R1 and d_R2"):
+        d_R1 = d_R_rel.transpose(-1, -2).contiguous() @ R2  # (B,3,3)
+        d_R2 = d_R_rel @ R1  # (B,3,3)
 
-    N = len(R_w2c)  # number of images
-    d_R_w2c = torch.zeros((N, 3, 3), device=R_w2c.device, dtype=R_w2c.dtype)  # (N,3,3)
-    d_t_w2c = torch.zeros((N, 3), device=t_w2c.device, dtype=t_w2c.dtype)  # (N,3)
+    with DebugTimer("---jiahao debug scatter reduce gradients"):
+        N = len(R_w2c)  # number of images
+        d_R_w2c = torch.zeros(
+            (N, 3, 3), device=R_w2c.device, dtype=R_w2c.dtype
+        )  # (N,3,3)
+        d_t_w2c = torch.zeros((N, 3), device=t_w2c.device, dtype=t_w2c.dtype)  # (N,3)
 
-    d_R_w2c.scatter_reduce_(
-        0,
-        image_idx1[:, None, None].expand(-1, 3, 3),
-        d_R1,
-        reduce="sum",
-        include_self=True,
-    )
-    d_R_w2c.scatter_reduce_(
-        0,
-        image_idx2[:, None, None].expand(-1, 3, 3),
-        d_R2,
-        reduce="sum",
-        include_self=True,
-    )
-    d_t_w2c.scatter_reduce_(
-        0,
-        image_idx1[:, None].expand(-1, 3),
-        d_t1,
-        reduce="sum",
-        include_self=True,
-    )
-    d_t_w2c.scatter_reduce_(
-        0,
-        image_idx2[:, None].expand(-1, 3),
-        d_t2,
-        reduce="sum",
-        include_self=True,
-    )
+        d_R_w2c.scatter_reduce_(
+            0,
+            image_idx1[:, None, None].expand(-1, 3, 3),
+            d_R1,
+            reduce="sum",
+            include_self=True,
+        )
+        d_R_w2c.scatter_reduce_(
+            0,
+            image_idx2[:, None, None].expand(-1, 3, 3),
+            d_R2,
+            reduce="sum",
+            include_self=True,
+        )
+        d_t_w2c.scatter_reduce_(
+            0,
+            image_idx1[:, None].expand(-1, 3),
+            d_t1,
+            reduce="sum",
+            include_self=True,
+        )
+        d_t_w2c.scatter_reduce_(
+            0,
+            image_idx2[:, None].expand(-1, 3),
+            d_t2,
+            reduce="sum",
+            include_self=True,
+        )
 
     # -------------------------------------------------------------- #
     # Return grads in input order
@@ -587,7 +607,6 @@ def loop(
     # computation_module = ComputationModule()
 
     ##### Optimization loop #####
-    from fastmap.debug import DebugTimer  # jiahao debug
 
     with torch.enable_grad():
         for iter_idx in range(1000000000):
