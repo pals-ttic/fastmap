@@ -9,19 +9,35 @@ from fastmap.utils import quantile_of_big_tensor
 
 
 class DebugTimer:
+    _disabled = False
+
     def __init__(self, name: str):
         self.name = name
 
     def __enter__(self):
+        if self._disabled:
+            return self
         torch.cuda.synchronize()  # ensure all previous operations are done
         self.start = time.perf_counter()
         return self  # allows use of `as` if needed
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._disabled:
+            return
         torch.cuda.synchronize()  # ensure all previous operations are done
         end = time.perf_counter()
         elapsed = end - self.start
         logger.debug(f"[{self.name}] Elapsed time: {elapsed:.6f} seconds")
+
+    @classmethod
+    def disable(cls):
+        """Disable all DebugTimer instances."""
+        cls._disabled = True
+
+    @classmethod
+    def enable(cls):
+        """Enable all DebugTimer instances."""
+        cls._disabled = False
 
 
 def pairwise_rotation_angle_error(

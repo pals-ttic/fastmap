@@ -1,3 +1,9 @@
+import os
+
+os.environ["TORCHINDUCTOR_FORCE_DISABLE_CACHES"] = (
+    "1"  # disable torchinductor cache for accurate timing
+)
+
 from loguru import logger
 import torch
 import torch.nn as nn
@@ -164,120 +170,97 @@ def quadratic_form(
     return W
 
 
-def compute_gradients(
-    image_camera_indices: torch.Tensor,  # long (B, 4)
-    R_w2c: torch.Tensor,  # float (N, 3, 3)
-    t_w2c: torch.Tensor,  # float (N, 3)
-    inv_focal_scale: torch.Tensor,  # float (C,)
-    W: torch.Tensor,  # float (B, 9, 9)
-):
-    # make sure everything is contiguous
-    assert image_camera_indices.is_contiguous()
-    assert R_w2c.is_contiguous()
-    assert t_w2c.is_contiguous()
-    assert inv_focal_scale.is_contiguous()
-    assert W.is_contiguous()
+class ComputeGradientModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # torch.set_float32_matmul_precision("high")
+        pass
 
-    # unbind image and camera indices
-    image_idx1, image_idx2, camera_idx1, camera_idx2 = image_camera_indices.unbind(
-        -1
-    )  # (B,), (B,), (B,), (B,)
+    @torch.no_grad()
+    def forward(
+        self,
+        image_camera_indices: torch.Tensor,  # long (B, 4)
+        R_w2c: torch.Tensor,  # float (N, 3, 3)
+        t_w2c: torch.Tensor,  # float (N, 3)
+        inv_focal_scale: torch.Tensor,  # float (C,)
+        W: torch.Tensor,  # float (B, 9, 9)
+    ):
+        # make sure everything is contiguous
+        assert image_camera_indices.is_contiguous()
+        assert R_w2c.is_contiguous()
+        assert t_w2c.is_contiguous()
+        assert inv_focal_scale.is_contiguous()
+        assert W.is_contiguous()
 
-    # ------------------------------------------------------------------ #
-    # Layer-1: gather poses & relative rotation
-    # ------------------------------------------------------------------ #
-    with DebugTimer("---jiahao debug gather poses"):
+        # unbind image and camera indices
+        image_idx1, image_idx2, camera_idx1, camera_idx2 = image_camera_indices.unbind(
+            -1
+        )  # (B,), (B,), (B,), (B,)
+
+        # ------------------------------------------------------------------ #
+        # Layer-1: gather poses & relative rotation
+        # ------------------------------------------------------------------ #
         R1 = R_w2c.index_select(0, image_idx1)  # (B,3,3)
         R2 = R_w2c.index_select(0, image_idx2)  # (B,3,3)
         t1 = t_w2c.index_select(0, image_idx1)  # (B,3)
         t2 = t_w2c.index_select(0, image_idx2)  # (B,3)
-    with DebugTimer("---jiahao debug relative rotation"):
         R_rel = R2 @ R1.transpose(-1, -2).contiguous()  # (B,3,3)
 
-    # ------------------------------------------------------------------ #
-    # Layer-2: essential matrix
-    # ------------------------------------------------------------------ #
-    with DebugTimer("---jiahao debug vector to skew symmetric matrix"):
+        # ------------------------------------------------------------------ #
+        # Layer-2: essential matrix
+        # ------------------------------------------------------------------ #
         t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
         t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
-    with DebugTimer("---jiahao debug essential matrix"):
         essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
 
-    # ------------------------------------------------------------------ #
-    # Layer-3: fundamental matrix (unnormalised)
-    # ------------------------------------------------------------------ #
-    with DebugTimer("---jiahao debug gather focal scales"):
+        # ------------------------------------------------------------------ #
+        # Layer-3: fundamental matrix (unnormalised)
+        # ------------------------------------------------------------------ #
         f1_inv = inv_focal_scale[camera_idx1]  # (B,)
         f2_inv = inv_focal_scale[camera_idx2]  # (B,)
-    with DebugTimer("---jiahao debug K1_inv and K2_inv"):
         K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)  # (B,3)
         K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)  # (B,3)
-    with DebugTimer("---jiahao debug fundamental matrix"):
         fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
 
-    # ------------------------------------------------------------------ #
-    # Layer-4: ℓ2-normalise the 9-vector
-    # ------------------------------------------------------------------ #
-    with DebugTimer("---jiahao debug flatten and normalise fundamental matrix"):
+        # ------------------------------------------------------------------ #
+        # Layer-4: ℓ2-normalise the 9-vector
+        # ------------------------------------------------------------------ #
         F_flat = fundamental.reshape(-1, 9)  # (B,9)
         F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
         F_normalised = F_flat / F_norm  # (B,9)
 
-    # ------------------------------------------------------------------ #
-    # Layer-5: quadratic loss
-    # ------------------------------------------------------------------ #
-    with DebugTimer("---jiahao debug compute loss"):
+        # ------------------------------------------------------------------ #
+        # Layer-5: quadratic loss
+        # ------------------------------------------------------------------ #
         W_vec = torch.einsum("bij,bj->bi", W, F_normalised)  # (B,9)
         loss = 0.5 * (F_normalised * W_vec).sum()  # scalar
 
-    # -------------------------------------------------------------- #
-    # ⇢ Layer-5
-    # -------------------------------------------------------------- #
-    d_vec = W_vec  # (B,9)
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-5
+        # -------------------------------------------------------------- #
+        d_vec = W_vec  # (B,9)
 
-    # -------------------------------------------------------------- #
-    # ⇢ Layer-4
-    # -------------------------------------------------------------- #
-    with DebugTimer("---jiahao debug compute d_F_flat"):
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-4
+        # -------------------------------------------------------------- #
         d_F_flat = (
             d_vec - (F_normalised * d_vec).sum(dim=-1, keepdim=True) * F_normalised
         ) / F_norm  # (B,9)
         d_F = d_F_flat.view(-1, 3, 3)  # (B,3,3)
 
-    # -------------------------------------------------------------- #
-    # ⇢ Layer-3
-    # -------------------------------------------------------------- #
-    with DebugTimer("---jiahao debug compute d_essential"):
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-3
+        # -------------------------------------------------------------- #
         d_E = d_F * K2_inv[:, :, None] * K1_inv[:, None, :]  # (B,3,3)
         d_K1_inv = d_F * essential * K2_inv[:, :, None]  # (B,3,3)
         d_K2_inv = d_F * essential * K1_inv[:, None, :]  # (B,3,3)
 
-    with DebugTimer("---jiahao debug compute d_f1_inv and d_f2_inv"):
         d_f1_inv = d_K1_inv[:, :, :2].sum((-1, -2))  # (B,)
         d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
 
-    with DebugTimer("---jiahao debug compute d_f_inv"):
-        num_cam = inv_focal_scale.shape[0]
-
-        if num_cam == 1:
-            # If there is only one camera, we can directly sum the gradients
-            d_f_inv = d_f1_inv.sum() + d_f2_inv.sum()
-            d_f_inv = d_f_inv.view(1)  # (1,)
-        else:
-            d_f_inv = torch.zeros(
-                (num_cam,), device=inv_focal_scale.device, dtype=inv_focal_scale.dtype
-            )  # (C,)
-            d_f_inv.scatter_reduce_(
-                0, camera_idx1, d_f1_inv, reduce="sum", include_self=True
-            )
-            d_f_inv.scatter_reduce_(
-                0, camera_idx2, d_f2_inv, reduce="sum", include_self=True
-            )
-
-    # -------------------------------------------------------------- #
-    # ⇢ Layer-2
-    # -------------------------------------------------------------- #
-    with DebugTimer("---jiahao debug compute d_t1_x and d_t2_x"):
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-2
+        # -------------------------------------------------------------- #
         d_R_rel = (
             d_E @ t1_x.transpose(-1, -2).contiguous()
             - t2_x.transpose(-1, -2).contiguous() @ d_E
@@ -285,7 +268,6 @@ def compute_gradients(
         d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
         d_t2_x = -d_E @ R_rel.transpose(-1, -2).contiguous()  # (B,3,3)
 
-    with DebugTimer("---jiahao debug compute d_t1 and d_t2"):
         d_t1 = torch.stack(  # (B,3)
             (
                 d_t1_x[:, 2, 1] - d_t1_x[:, 1, 2],
@@ -303,14 +285,66 @@ def compute_gradients(
             dim=-1,
         )
 
-    # -------------------------------------------------------------- #
-    # ⇢ Layer-1
-    # -------------------------------------------------------------- #
-    with DebugTimer("---jiahao debug compute d_R1 and d_R2"):
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-1
+        # -------------------------------------------------------------- #
         d_R1 = d_R_rel.transpose(-1, -2).contiguous() @ R2  # (B,3,3)
         d_R2 = d_R_rel @ R1  # (B,3,3)
 
-    with DebugTimer("---jiahao debug scatter reduce gradients"):
+        # -------------------------------------------------------------- #
+        # Return grads in input order
+        # -------------------------------------------------------------- #
+        return (
+            loss,
+            d_R1,  # R_w2c
+            d_R2,  # R_w2c
+            d_t1,  # t_w2c
+            d_t2,  # t_w2c
+            d_f1_inv,  # inv_focal_scale
+            d_f2_inv,  # inv_focal_scale
+        )
+
+
+class ComputeGradient:
+    def __init__(self):
+        self.module = ComputeGradientModule().eval()
+        self.module = torch.compile(self.module, mode="max-autotune")
+        # self.module = torch.compile(self.module, mode="reduce-overhead")
+
+    def __call__(self, image_camera_indices, R_w2c, t_w2c, inv_focal_scale, W):
+        loss, d_R1, d_R2, d_t1, d_t2, d_f1_inv, d_f2_inv = self.module(
+            image_camera_indices=image_camera_indices,  # (num_image_pairs, 4)
+            R_w2c=R_w2c,
+            t_w2c=t_w2c,
+            inv_focal_scale=inv_focal_scale,  # (num_cameras,)
+            W=W,
+        )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
+
+        num_cam = inv_focal_scale.shape[0]
+
+        # unbind image and camera indices
+        image_idx1, image_idx2, camera_idx1, camera_idx2 = image_camera_indices.unbind(
+            -1
+        )  # (B,), (B,), (B,), (B,)
+
+        if num_cam == 1:
+            # If there is only one camera, we can directly sum the gradients
+            d_f_inv = d_f1_inv.sum() + d_f2_inv.sum()
+            d_f_inv = d_f_inv.view(1)  # (1,)
+        else:
+            d_f_inv = torch.zeros(
+                (num_cam,),
+                device=inv_focal_scale.device,
+                dtype=inv_focal_scale.dtype,
+            )  # (C,)
+            d_f_inv.scatter_reduce_(
+                0, camera_idx1, d_f1_inv, reduce="sum", include_self=True
+            )
+            d_f_inv.scatter_reduce_(
+                0, camera_idx2, d_f2_inv, reduce="sum", include_self=True
+            )
+        d_inv_focal_scale = d_f_inv  # (num_cameras,)
+
         N = len(R_w2c)  # number of images
         d_R_w2c = torch.zeros(
             (N, 3, 3), device=R_w2c.device, dtype=R_w2c.dtype
@@ -345,6 +379,178 @@ def compute_gradients(
             reduce="sum",
             include_self=True,
         )
+
+        # return the gradients in the order of inputs
+        return (
+            loss,  # scalar
+            d_R_w2c,  # R_w2c
+            d_t_w2c,  # t_w2c
+            d_inv_focal_scale,  # inv_focal_scale
+        )  # (num_cameras,)
+
+
+def old_compute_gradients(
+    image_camera_indices: torch.Tensor,  # long (B, 4)
+    R_w2c: torch.Tensor,  # float (N, 3, 3)
+    t_w2c: torch.Tensor,  # float (N, 3)
+    inv_focal_scale: torch.Tensor,  # float (C,)
+    W: torch.Tensor,  # float (B, 9, 9)
+):
+    # make sure everything is contiguous
+    assert image_camera_indices.is_contiguous()
+    assert R_w2c.is_contiguous()
+    assert t_w2c.is_contiguous()
+    assert inv_focal_scale.is_contiguous()
+    assert W.is_contiguous()
+
+    # unbind image and camera indices
+    image_idx1, image_idx2, camera_idx1, camera_idx2 = image_camera_indices.unbind(
+        -1
+    )  # (B,), (B,), (B,), (B,)
+
+    # ------------------------------------------------------------------ #
+    # Layer-1: gather poses & relative rotation
+    # ------------------------------------------------------------------ #
+    R1 = R_w2c.index_select(0, image_idx1)  # (B,3,3)
+    R2 = R_w2c.index_select(0, image_idx2)  # (B,3,3)
+    t1 = t_w2c.index_select(0, image_idx1)  # (B,3)
+    t2 = t_w2c.index_select(0, image_idx2)  # (B,3)
+    R_rel = R2 @ R1.transpose(-1, -2).contiguous()  # (B,3,3)
+
+    # ------------------------------------------------------------------ #
+    # Layer-2: essential matrix
+    # ------------------------------------------------------------------ #
+    t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
+    t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
+    essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
+
+    # ------------------------------------------------------------------ #
+    # Layer-3: fundamental matrix (unnormalised)
+    # ------------------------------------------------------------------ #
+    f1_inv = inv_focal_scale[camera_idx1]  # (B,)
+    f2_inv = inv_focal_scale[camera_idx2]  # (B,)
+    K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)  # (B,3)
+    K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)  # (B,3)
+    fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
+
+    # ------------------------------------------------------------------ #
+    # Layer-4: ℓ2-normalise the 9-vector
+    # ------------------------------------------------------------------ #
+    F_flat = fundamental.reshape(-1, 9)  # (B,9)
+    F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
+    F_normalised = F_flat / F_norm  # (B,9)
+
+    # ------------------------------------------------------------------ #
+    # Layer-5: quadratic loss
+    # ------------------------------------------------------------------ #
+    W_vec = torch.einsum("bij,bj->bi", W, F_normalised)  # (B,9)
+    loss = 0.5 * (F_normalised * W_vec).sum()  # scalar
+
+    # -------------------------------------------------------------- #
+    # ⇢ Layer-5
+    # -------------------------------------------------------------- #
+    d_vec = W_vec  # (B,9)
+
+    # -------------------------------------------------------------- #
+    # ⇢ Layer-4
+    # -------------------------------------------------------------- #
+    d_F_flat = (
+        d_vec - (F_normalised * d_vec).sum(dim=-1, keepdim=True) * F_normalised
+    ) / F_norm  # (B,9)
+    d_F = d_F_flat.view(-1, 3, 3)  # (B,3,3)
+
+    # -------------------------------------------------------------- #
+    # ⇢ Layer-3
+    # -------------------------------------------------------------- #
+    d_E = d_F * K2_inv[:, :, None] * K1_inv[:, None, :]  # (B,3,3)
+    d_K1_inv = d_F * essential * K2_inv[:, :, None]  # (B,3,3)
+    d_K2_inv = d_F * essential * K1_inv[:, None, :]  # (B,3,3)
+
+    d_f1_inv = d_K1_inv[:, :, :2].sum((-1, -2))  # (B,)
+    d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
+
+    num_cam = inv_focal_scale.shape[0]
+
+    if num_cam == 1:
+        # If there is only one camera, we can directly sum the gradients
+        d_f_inv = d_f1_inv.sum() + d_f2_inv.sum()
+        d_f_inv = d_f_inv.view(1)  # (1,)
+    else:
+        d_f_inv = torch.zeros(
+            (num_cam,), device=inv_focal_scale.device, dtype=inv_focal_scale.dtype
+        )  # (C,)
+        d_f_inv.scatter_reduce_(
+            0, camera_idx1, d_f1_inv, reduce="sum", include_self=True
+        )
+        d_f_inv.scatter_reduce_(
+            0, camera_idx2, d_f2_inv, reduce="sum", include_self=True
+        )
+
+    # -------------------------------------------------------------- #
+    # ⇢ Layer-2
+    # -------------------------------------------------------------- #
+    d_R_rel = (
+        d_E @ t1_x.transpose(-1, -2).contiguous()
+        - t2_x.transpose(-1, -2).contiguous() @ d_E
+    )  # (B,3,3)
+    d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
+    d_t2_x = -d_E @ R_rel.transpose(-1, -2).contiguous()  # (B,3,3)
+
+    d_t1 = torch.stack(  # (B,3)
+        (
+            d_t1_x[:, 2, 1] - d_t1_x[:, 1, 2],
+            d_t1_x[:, 0, 2] - d_t1_x[:, 2, 0],
+            d_t1_x[:, 1, 0] - d_t1_x[:, 0, 1],
+        ),
+        dim=-1,
+    )
+    d_t2 = torch.stack(  # (B,3)
+        (
+            d_t2_x[:, 2, 1] - d_t2_x[:, 1, 2],
+            d_t2_x[:, 0, 2] - d_t2_x[:, 2, 0],
+            d_t2_x[:, 1, 0] - d_t2_x[:, 0, 1],
+        ),
+        dim=-1,
+    )
+
+    # -------------------------------------------------------------- #
+    # ⇢ Layer-1
+    # -------------------------------------------------------------- #
+    d_R1 = d_R_rel.transpose(-1, -2).contiguous() @ R2  # (B,3,3)
+    d_R2 = d_R_rel @ R1  # (B,3,3)
+
+    N = len(R_w2c)  # number of images
+    d_R_w2c = torch.zeros((N, 3, 3), device=R_w2c.device, dtype=R_w2c.dtype)  # (N,3,3)
+    d_t_w2c = torch.zeros((N, 3), device=t_w2c.device, dtype=t_w2c.dtype)  # (N,3)
+
+    d_R_w2c.scatter_reduce_(
+        0,
+        image_idx1[:, None, None].expand(-1, 3, 3),
+        d_R1,
+        reduce="sum",
+        include_self=True,
+    )
+    d_R_w2c.scatter_reduce_(
+        0,
+        image_idx2[:, None, None].expand(-1, 3, 3),
+        d_R2,
+        reduce="sum",
+        include_self=True,
+    )
+    d_t_w2c.scatter_reduce_(
+        0,
+        image_idx1[:, None].expand(-1, 3),
+        d_t1,
+        reduce="sum",
+        include_self=True,
+    )
+    d_t_w2c.scatter_reduce_(
+        0,
+        image_idx2[:, None].expand(-1, 3),
+        d_t2,
+        reduce="sum",
+        include_self=True,
+    )
 
     # -------------------------------------------------------------- #
     # Return grads in input order
@@ -491,7 +697,11 @@ def loop(
     R_w2c: torch.Tensor,
     t_w2c: torch.Tensor,
     focal_scale: torch.Tensor,
+    image_idx1: torch.Tensor,
+    image_idx2: torch.Tensor,
+    image_pair_mask: torch.Tensor,
     point_pairs: PointPairs,
+    image_pair_idx: torch.Tensor,
     point_pair_mask: torch.Tensor,
     camera_idx: torch.Tensor,
     lr: float = 0.0001,
@@ -504,7 +714,11 @@ def loop(
         R_w2c: torch.Tensor float (num_images, 3, 3), w2c global rotation matrices for each image
         t_w2c: torch.Tensor float (num_images, 3), w2c global translation vectors for each image
         focal_scale: torch.Tensor float (num_cameras,), the scale factor on focal lengths
+        image_idx1: torch.Tensor long (num_image_pairs,), the first image idx for each image pair
+        image_idx2: torch.Tensor long (num_image_pairs,), the second image idx for each image pair
+        image_pair_mask: torch.Tensor bool (num_image_pairs,), the mask indicating the valid image pairs
         point_pairs: PointPairs container
+        image_pair_idx: torch.Tensor long (num_point_pairs,), the image pair index for each point pair
         point_pair_mask: torch.Tensor bool (num_point_pairs,), the mask indicating the inlier point pairs
         camera_idx: torch.Tensor long (num_images,), the camera idx for each image
         lr: float, the learning rate for the optimization.
@@ -522,31 +736,6 @@ def loop(
     ##### Get original dtype #####
     orig_dtype = R_w2c.dtype
 
-    ##### Find all image pairs with a non-empty set of inliers #####
-    # get point pair idx
-    unique_image_idx, _inverse_idx = torch.unique(
-        torch.stack(
-            [
-                point_pairs.image_idx[point_pairs.point_idx1][point_pair_mask],
-                point_pairs.image_idx[point_pairs.point_idx2][point_pair_mask],
-            ],
-            dim=-1,
-        ),
-        dim=0,
-        return_inverse=True,
-    )  # (num_image_pairs, 2), (num_valid_point_pairs,)
-    image_idx1, image_idx2 = unique_image_idx.unbind(
-        -1
-    )  # (num_image_pairs,), (num_image_pairs,)
-    image_pair_idx = 209347298473 + torch.zeros(
-        point_pairs.num_point_pairs, device=point_pairs.device, dtype=torch.long
-    )  # (num_point_pairs,) use a large number to indicate invalid
-    image_pair_idx[point_pair_mask] = _inverse_idx  # (num_point_pairs,)
-    del unique_image_idx, _inverse_idx
-
-    # get number of image pairs
-    num_image_pairs = image_idx1.shape[0]
-
     ##### Compute the quadratic form #####
     # compute the initial fundamental matrix
     initial_fundamental = _compute_fundamental_matrix(
@@ -560,13 +749,18 @@ def loop(
 
     # compute the weighted quadratic form
     W = quadratic_form(
-        num_image_pairs=num_image_pairs,
+        num_image_pairs=len(image_idx1),
         point_pairs=point_pairs,
         image_pair_idx=image_pair_idx,
         prev_fundamental=initial_fundamental,
         point_pair_mask=point_pair_mask,
         precision=precision,
     )  # (num_image_pairs, 9, 9)
+
+    # mask out invalid image pairs
+    if not image_pair_mask.all():
+        W[~image_pair_mask] = 0.0  # (num_image_pairs, 9, 9)
+        del image_pair_mask
 
     # prevent misuse
     del initial_fundamental
@@ -605,61 +799,74 @@ def loop(
 
     # computation module
     # computation_module = ComputationModule()
+    compute_gradients = ComputeGradient()
 
     ##### Optimization loop #####
+    DebugTimer.disable()  # jiahao debug
 
     with torch.enable_grad():
         for iter_idx in range(1000000000):
-            with DebugTimer("jiahao debug params forward"):
-                (
-                    R_w2c,
-                    t_w2c,
-                    _,  # focal_scale
-                    inv_focal_scale,
-                ) = params()  # (num_images, 3, 3), (num_images, 3), (num_cameras,)
+            with DebugTimer("jiahao debug whole iteration ############"):
+                with DebugTimer("jiahao debug params forward"):
+                    (
+                        R_w2c,
+                        t_w2c,
+                        _,  # focal_scale
+                        inv_focal_scale,
+                    ) = params()  # (num_images, 3, 3), (num_images, 3), (num_cameras,)
 
-            # compute the loss
-            with DebugTimer("jiahao debug compute gradients"):
-                loss, d_R_w2c, d_t_w2c, d_inv_focal_scale = compute_gradients(
-                    image_camera_indices=image_camera_indices,  # (num_image_pairs, 4)
-                    R_w2c=R_w2c,
-                    t_w2c=t_w2c,
-                    inv_focal_scale=inv_focal_scale,  # (num_cameras,)
-                    W=W,
-                )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
+                # compute the loss
+                with DebugTimer("jiahao debug compute gradients"):
+                    if False:
+                        loss, d_R_w2c, d_t_w2c, d_inv_focal_scale = (
+                            old_compute_gradients(
+                                image_camera_indices=image_camera_indices,  # (num_image_pairs, 4)
+                                R_w2c=R_w2c,
+                                t_w2c=t_w2c,
+                                inv_focal_scale=inv_focal_scale,  # (num_cameras,)
+                                W=W,
+                            )
+                        )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
+                    else:
+                        loss, d_R_w2c, d_t_w2c, d_inv_focal_scale = compute_gradients(
+                            image_camera_indices=image_camera_indices,  # (num_image_pairs, 4)
+                            R_w2c=R_w2c,
+                            t_w2c=t_w2c,
+                            inv_focal_scale=inv_focal_scale,  # (num_cameras,)
+                            W=W,
+                        )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
 
-            # backprop
-            with DebugTimer("jiahao debug zero_grad"):
-                optimizer.zero_grad()
-            # loss.backward()
+                # backprop
+                with DebugTimer("jiahao debug zero_grad"):
+                    optimizer.zero_grad()
+                # loss.backward()
 
-            # backward
-            with DebugTimer("jiahao debug backward"):
-                torch.autograd.backward(
-                    tensors=[R_w2c, t_w2c, inv_focal_scale],
-                    grad_tensors=[d_R_w2c, d_t_w2c, d_inv_focal_scale],
+                # backward
+                with DebugTimer("jiahao debug backward"):
+                    torch.autograd.backward(
+                        tensors=[R_w2c, t_w2c, inv_focal_scale],
+                        grad_tensors=[d_R_w2c, d_t_w2c, d_inv_focal_scale],
+                    )
+
+                # step
+                with DebugTimer("jiahao debug optimizer step"):
+                    optimizer.step()
+
+                # check convergence
+                moving_loss, if_converged = convergence_manager.step(
+                    step=iter_idx, loss=loss
                 )
+                if if_converged:
+                    logger.info(
+                        f"Converged at iteration {iter_idx+1} with moving loss {moving_loss:.8f}"
+                    )
+                    break
 
-            # step
-            with DebugTimer("jiahao debug optimizer step"):
-                optimizer.step()
-
-            # check convergence
-            moving_loss, if_converged = convergence_manager.step(
-                step=iter_idx, loss=loss
-            )
-            if if_converged:
-                logger.info(
-                    f"Converged at iteration {iter_idx+1} with moving loss {moving_loss:.8f}"
-                )
-                break
-
-            # log
-            if iter_idx % log_interval == 0:
-                logger.info(
-                    f"[Iter {iter_idx} ({precision})] loss={loss.item():.8f}, moving_loss={moving_loss:.8f}"
-                )
-            logger.debug("jiahao debug ---------------------")
+                # log
+                if iter_idx % log_interval == 0:
+                    logger.info(
+                        f"[Iter {iter_idx} ({precision})] loss={loss.item():.8f}, moving_loss={moving_loss:.8f}"
+                    )
 
     ##### Get the results and convert to the original dtype #####
     (
@@ -734,6 +941,39 @@ def epipolar_adjustment(
         images.mask[point_pairs.image_idx[point_pairs.point_idx2][point_pair_mask]]
     )
 
+    ##### Preserve the original point pair mask #####
+    original_point_pair_mask = point_pair_mask.clone()  # (num_point_pairs,)
+
+    ##### Find all image pairs with a non-empty set of inliers #####
+    # get point pair idx
+    unique_image_idx, _inverse_idx = torch.unique(
+        torch.stack(
+            [
+                point_pairs.image_idx[point_pairs.point_idx1][point_pair_mask],
+                point_pairs.image_idx[point_pairs.point_idx2][point_pair_mask],
+            ],
+            dim=-1,
+        ),
+        dim=0,
+        return_inverse=True,
+    )  # (num_image_pairs, 2), (num_valid_point_pairs,)
+    image_idx1, image_idx2 = unique_image_idx.unbind(
+        -1
+    )  # (num_image_pairs,), (num_image_pairs,)
+    image_pair_idx = 209347298473 + torch.zeros(
+        point_pairs.num_point_pairs, device=point_pairs.device, dtype=torch.long
+    )  # (num_point_pairs,) use a large number to indicate invalid
+    image_pair_idx[point_pair_mask] = _inverse_idx  # (num_point_pairs,)
+    del unique_image_idx, _inverse_idx
+
+    # get number of image pairs
+    num_image_pairs = image_idx1.shape[0]
+
+    # initialize image pair mask
+    image_pair_mask = torch.ones(
+        num_image_pairs, device=device, dtype=torch.bool
+    )  # (num_image_pairs,)
+
     ##### Get all the pruning thresholds #####
     thr_list = torch.linspace(
         min_thr, max_thr, num_prune_steps, device=device
@@ -761,7 +1001,11 @@ def epipolar_adjustment(
                         R_w2c=R_w2c,
                         t_w2c=t_w2c,
                         focal_scale=focal_scale,
+                        image_idx1=image_idx1,
+                        image_idx2=image_idx2,
+                        image_pair_mask=image_pair_mask,
                         point_pairs=point_pairs,
+                        image_pair_idx=image_pair_idx,
                         point_pair_mask=point_pair_mask,
                         camera_idx=cameras.camera_idx,
                         lr=lr,
@@ -780,7 +1024,9 @@ def epipolar_adjustment(
                     camera_idx=cameras.camera_idx,
                     image_mask=images.mask,
                 )  # (num_point_pairs,)
-                point_pair_mask = error < thr  # (num_point_pairs,)
+                point_pair_mask = original_point_pair_mask & (
+                    error < thr
+                )  # (num_point_pairs,)
                 del error
 
                 # make sure only valid images are used
@@ -790,6 +1036,20 @@ def epipolar_adjustment(
                 point_pair_mask &= images.mask[
                     point_pairs.image_idx[point_pairs.point_idx2]
                 ]
+
+                # update image pair mask
+                point_pair_count = torch.zeros(
+                    num_image_pairs, device=device, dtype=torch.long
+                )  # (num_image_pairs,)
+                point_pair_count.scatter_add_(
+                    dim=0,
+                    index=image_pair_idx[point_pair_mask],
+                    src=torch.ones_like(
+                        image_pair_idx[point_pair_mask], device=device, dtype=torch.long
+                    ),
+                )
+                image_pair_mask = point_pair_count > 0
+                del point_pair_count
 
                 # log
                 logger.info(
