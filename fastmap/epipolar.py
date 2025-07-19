@@ -244,11 +244,21 @@ def compute_gradients(
     d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
 
     num_cam = inv_focal_scale.shape[0]
-    d_f_inv = torch.zeros(
-        (num_cam,), device=inv_focal_scale.device, dtype=inv_focal_scale.dtype
-    )  # (C,)
-    d_f_inv.scatter_reduce_(0, camera_idx1, d_f1_inv, reduce="sum", include_self=True)
-    d_f_inv.scatter_reduce_(0, camera_idx2, d_f2_inv, reduce="sum", include_self=True)
+
+    if num_cam == 1:
+        # If there is only one camera, we can directly sum the gradients
+        d_f_inv = d_f1_inv.sum() + d_f2_inv.sum()
+        d_f_inv = d_f_inv.view(1)  # (1,)
+    else:
+        d_f_inv = torch.zeros(
+            (num_cam,), device=inv_focal_scale.device, dtype=inv_focal_scale.dtype
+        )  # (C,)
+        d_f_inv.scatter_reduce_(
+            0, camera_idx1, d_f1_inv, reduce="sum", include_self=True
+        )
+        d_f_inv.scatter_reduce_(
+            0, camera_idx2, d_f2_inv, reduce="sum", include_self=True
+        )
 
     # -------------------------------------------------------------- #
     # ⇢ Layer-2
