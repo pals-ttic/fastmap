@@ -817,7 +817,7 @@ def loop(
     compute_gradients = ComputeGradient()
 
     ##### Optimization loop #####
-    # DebugTimer.disable()  # jiahao debug
+    DebugTimer.disable()  # jiahao debug
 
     with torch.enable_grad():
         for iter_idx in range(1000000000):
