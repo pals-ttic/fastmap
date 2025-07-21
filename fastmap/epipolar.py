@@ -205,7 +205,7 @@ class ComputeGradientModule(nn.Module):
             R2 = R_w2c.index_select(0, image_idx2)  # (B,3,3)
             t1 = t_w2c.index_select(0, image_idx1)  # (B,3)
             t2 = t_w2c.index_select(0, image_idx2)  # (B,3)
-            R_rel = R2 @ R1.transpose(-1, -2).contiguous()  # (B,3,3)
+            R_rel = R2 @ R1.transpose(-1, -2)  # (B,3,3)
 
         # ------------------------------------------------------------------ #
         # Layer-2: essential matrix
@@ -276,11 +276,11 @@ class ComputeGradientModule(nn.Module):
         # -------------------------------------------------------------- #
         with DebugTimer("-- d_R_rel, d_t1_x, d_t2_x"):
             d_R_rel = (
-                d_E @ t1_x.transpose(-1, -2).contiguous()
+                d_E @ t1_x.transpose(-1, -2)
                 - t2_x.transpose(-1, -2).contiguous() @ d_E
             )  # (B,3,3)
             d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
-            d_t2_x = -d_E @ R_rel.transpose(-1, -2).contiguous()  # (B,3,3)
+            d_t2_x = -d_E @ R_rel.transpose(-1, -2)  # (B,3,3)
 
         with DebugTimer("-- d_t1, d_t2"):
             d_t1 = torch.stack(  # (B,3)
