@@ -85,12 +85,8 @@ __global__ void epipolarKernel(const T *__restrict__ R1GlobalPtr,
   }
 }
 
-// Explicit instantiations
-template __global__ void epipolarKernel<float>(const float *, const float *,
-                                               const float *, const float *,
-                                               const float *, float *, int);
-
 // Thin C++ wrapper that launches the kernel on the current stream
+template <typename T>
 at::Tensor epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
                              const at::Tensor &t1, const at::Tensor &t2,
                              const at::Tensor &W) {
@@ -102,14 +98,18 @@ at::Tensor epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
   constexpr int numThreadsPerBlock = BATCH_SIZE * 3 * 3;
   const int numBlocks = 1024;
 
-  // Dispatch on scalar type (float, double, half, …)
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(R1.scalar_type(), "epipolar_kernel", [&] {
-    epipolarKernel<scalar_t><<<numBlocks, numThreadsPerBlock, 0,
-                               at::cuda::getCurrentCUDAStream()>>>(
-        R1.data_ptr<scalar_t>(), R2.data_ptr<scalar_t>(),
-        t1.data_ptr<scalar_t>(), t2.data_ptr<scalar_t>(),
-        W.data_ptr<scalar_t>(), R_rel.data_ptr<scalar_t>(), R1.size(0));
-  });
+  // Launch the kernel
+  epipolarKernel<T>
+      <<<numBlocks, numThreadsPerBlock, 0, at::cuda::getCurrentCUDAStream()>>>(
+          R1.data_ptr<T>(), R2.data_ptr<T>(), t1.data_ptr<T>(),
+          t2.data_ptr<T>(), W.data_ptr<T>(), R_rel.data_ptr<T>(), R1.size(0));
 
   return R_rel;
 }
+
+// Explicit instantiation
+template at::Tensor epipolar_gradient<float>(const at::Tensor &R1,
+                                             const at::Tensor &R2,
+                                             const at::Tensor &t1,
+                                             const at::Tensor &t2,
+                                             const at::Tensor &W);

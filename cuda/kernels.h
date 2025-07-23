@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
+template <typename T>
 at::Tensor epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
                              const at::Tensor &t1, const at::Tensor &t2,
                              const at::Tensor &W);
