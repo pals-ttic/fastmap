@@ -200,8 +200,8 @@ class ComputeGradientModule(nn.Module):
         # ------------------------------------------------------------------ #
         # Layer-1: gather poses & relative rotation
         # ------------------------------------------------------------------ #
-        with DebugTimer("-- gather poses & relative rotation"):
-            R_rel = R2 @ R1.transpose(-1, -2)  # (B,3,3)
+        with DebugTimer("-- gt relative rotation"):
+            R_rel = epipolar_gradient(R1=R1, R2=R2, t1=t1, t2=t2, W=W)  # (B,3,3)
 
         # ------------------------------------------------------------------ #
         # Layer-2: essential matrix
