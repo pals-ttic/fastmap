@@ -1,12 +1,11 @@
-#include <c10/cuda/CUDAStream.h> // (same, either header is fine)
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
 #include "kernels.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.doc() = "CUDA extension for epipolar adjustment";
-  m.def("epipolar_adjustment_compute_gradient",
-        &epipolar_adjustment_compute_gradient,
-        "Add two same-shape CUDA tensors");
+  m.doc() = "CUDA extension for FastMap";
+  m.def("epipolar_gradient", &epipolar_gradient,
+        "Compute the epipolar gradient");
 }

@@ -20,6 +20,7 @@ from fastmap.utils import (
 )
 from fastmap.utils import ConvergenceManager
 from fastmap.debug import DebugTimer  # jiahao debug
+from fastmap.cuda import epipolar_gradient
 
 
 class EpipolarAdjustmentParameters(nn.Module):
@@ -179,32 +180,27 @@ class ComputeGradientModule(nn.Module):
     @torch.no_grad()
     def forward(
         self,
-        image_camera_indices: torch.Tensor,  # long (B, 4)
-        R_w2c: torch.Tensor,  # float (N, 3, 3)
-        t_w2c: torch.Tensor,  # float (N, 3)
-        inv_focal_scale: torch.Tensor,  # float (C,)
+        R1: torch.Tensor,  # float (B, 3, 3)
+        R2: torch.Tensor,  # float (B, 3, 3)
+        t1: torch.Tensor,  # float (B, 3)
+        t2: torch.Tensor,  # float (B, 3)
+        f1_inv: torch.Tensor,  # float (B,)
+        f2_inv: torch.Tensor,  # float (B,)
         W: torch.Tensor,  # float (B, 9, 9)
     ):
         # make sure everything is contiguous
-        assert image_camera_indices.is_contiguous()
-        assert R_w2c.is_contiguous()
-        assert t_w2c.is_contiguous()
-        assert inv_focal_scale.is_contiguous()
+        assert R1.is_contiguous()
+        assert R2.is_contiguous()
+        assert t1.is_contiguous()
+        assert t2.is_contiguous()
+        assert f1_inv.is_contiguous()
+        assert f2_inv.is_contiguous()
         assert W.is_contiguous()
-
-        # unbind image and camera indices
-        image_idx1, image_idx2, camera_idx1, camera_idx2 = image_camera_indices.unbind(
-            -1
-        )  # (B,), (B,), (B,), (B,)
 
         # ------------------------------------------------------------------ #
         # Layer-1: gather poses & relative rotation
         # ------------------------------------------------------------------ #
         with DebugTimer("-- gather poses & relative rotation"):
-            R1 = R_w2c.index_select(0, image_idx1)  # (B,3,3)
-            R2 = R_w2c.index_select(0, image_idx2)  # (B,3,3)
-            t1 = t_w2c.index_select(0, image_idx1)  # (B,3)
-            t2 = t_w2c.index_select(0, image_idx2)  # (B,3)
             R_rel = R2 @ R1.transpose(-1, -2)  # (B,3,3)
 
         # ------------------------------------------------------------------ #
@@ -219,8 +215,6 @@ class ComputeGradientModule(nn.Module):
         # Layer-3: fundamental matrix (unnormalised)
         # ------------------------------------------------------------------ #
         with DebugTimer("-- fundamental matrix (unnormalised)"):
-            f1_inv = inv_focal_scale[camera_idx1]  # (B,)
-            f2_inv = inv_focal_scale[camera_idx2]  # (B,)
             K1_inv = torch.stack(
                 (f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1
             )  # (B,3)
@@ -276,8 +270,7 @@ class ComputeGradientModule(nn.Module):
         # -------------------------------------------------------------- #
         with DebugTimer("-- d_R_rel, d_t1_x, d_t2_x"):
             d_R_rel = (
-                d_E @ t1_x.transpose(-1, -2)
-                - t2_x.transpose(-1, -2).contiguous() @ d_E
+                d_E @ t1_x.transpose(-1, -2) - t2_x.transpose(-1, -2).contiguous() @ d_E
             )  # (B,3,3)
             d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
             d_t2_x = -d_E @ R_rel.transpose(-1, -2)  # (B,3,3)
@@ -327,21 +320,35 @@ class ComputeGradient:
         # self.module = torch.compile(self.module, mode="max-autotune")
         # self.module = torch.compile(self.module, mode="reduce-overhead")
 
-    def __call__(self, image_camera_indices, R_w2c, t_w2c, inv_focal_scale, W):
+    def __call__(
+        self,
+        image_idx1,
+        image_idx2,
+        camera_idx1,
+        camera_idx2,
+        R_w2c,
+        t_w2c,
+        inv_focal_scale,
+        W,
+    ):
+        R1 = R_w2c.index_select(0, image_idx1)  # (B,3,3)
+        R2 = R_w2c.index_select(0, image_idx2)  # (B,3,3)
+        t1 = t_w2c.index_select(0, image_idx1)  # (B,3)
+        t2 = t_w2c.index_select(0, image_idx2)  # (B,3)
+        f1_inv = inv_focal_scale[camera_idx1]  # (B,)
+        f2_inv = inv_focal_scale[camera_idx2]  # (B,)
+
         loss, d_R1, d_R2, d_t1, d_t2, d_f1_inv, d_f2_inv = self.module(
-            image_camera_indices=image_camera_indices,  # (num_image_pairs, 4)
-            R_w2c=R_w2c,
-            t_w2c=t_w2c,
-            inv_focal_scale=inv_focal_scale,  # (num_cameras,)
+            R1=R1,
+            R2=R2,
+            t1=t1,
+            t2=t2,
+            f1_inv=f1_inv,
+            f2_inv=f2_inv,
             W=W,
         )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
 
         num_cam = inv_focal_scale.shape[0]
-
-        # unbind image and camera indices
-        image_idx1, image_idx2, camera_idx1, camera_idx2 = image_camera_indices.unbind(
-            -1
-        )  # (B,), (B,), (B,), (B,)
 
         with DebugTimer("-- scatter_reduce"):
             if num_cam == 1:
@@ -783,16 +790,7 @@ def loop(
     ##### Compose image camera indices #####
     camera_idx1 = camera_idx[image_idx1]  # (num_image_pairs,)
     camera_idx2 = camera_idx[image_idx2]  # (num_image_pairs,)
-    image_camera_indices = torch.stack(
-        [
-            image_idx1,
-            image_idx2,
-            camera_idx1,
-            camera_idx2,
-        ],
-        dim=-1,
-    )  # (num_image_pairs, 4)
-    del image_idx1, image_idx2, camera_idx1, camera_idx2, camera_idx
+    del camera_idx
 
     ##### Initialize parameters for optimization #####
     params = EpipolarAdjustmentParameters(
@@ -844,7 +842,10 @@ def loop(
                         )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
                     else:
                         loss, d_R_w2c, d_t_w2c, d_inv_focal_scale = compute_gradients(
-                            image_camera_indices=image_camera_indices,  # (num_image_pairs, 4)
+                            image_idx1=image_idx1,
+                            image_idx2=image_idx2,
+                            camera_idx1=camera_idx1,
+                            camera_idx2=camera_idx2,
                             R_w2c=R_w2c,
                             t_w2c=t_w2c,
                             inv_focal_scale=inv_focal_scale,  # (num_cameras,)

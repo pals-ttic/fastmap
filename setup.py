@@ -27,7 +27,7 @@ setup(
         CUDAExtension(
             name=f"{PACKAGE_NAME}.cuda",
             sources=[
-                str(SOURCE_DIR / "epipolar_adjustment.cu"),
+                str(SOURCE_DIR / "epipolar.cu"),
                 str(SOURCE_DIR / "interface.cc"),
             ],
             extra_compile_args={
