@@ -171,7 +171,150 @@ def quadratic_form(
     return W
 
 
-class ComputeGradientModule(nn.Module):
+class TorchComputeGradientModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # torch.set_float32_matmul_precision("high")
+        pass
+
+    @torch.no_grad()
+    def forward(
+        self,
+        R1: torch.Tensor,  # float (B, 3, 3)
+        R2: torch.Tensor,  # float (B, 3, 3)
+        t1: torch.Tensor,  # float (B, 3)
+        t2: torch.Tensor,  # float (B, 3)
+        f1_inv: torch.Tensor,  # float (B,)
+        f2_inv: torch.Tensor,  # float (B,)
+        W: torch.Tensor,  # float (B, 9, 9)
+    ):
+        # make sure everything is contiguous
+        assert R1.is_contiguous()
+        assert R2.is_contiguous()
+        assert t1.is_contiguous()
+        assert t2.is_contiguous()
+        assert f1_inv.is_contiguous()
+        assert f2_inv.is_contiguous()
+        assert W.is_contiguous()
+
+        # ------------------------------------------------------------------ #
+        # Layer-1: gather poses & relative rotation
+        # ------------------------------------------------------------------ #
+        with DebugTimer("-- gather poses & relative rotation"):
+            R_rel = R2 @ R1.transpose(-1, -2)  # (B,3,3)
+
+        # ------------------------------------------------------------------ #
+        # Layer-2: essential matrix
+        # ------------------------------------------------------------------ #
+        with DebugTimer("-- essential matrix"):
+            t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
+            t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
+            essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
+
+        # ------------------------------------------------------------------ #
+        # Layer-3: fundamental matrix (unnormalised)
+        # ------------------------------------------------------------------ #
+        with DebugTimer("-- fundamental matrix (unnormalised)"):
+            K1_inv = torch.stack(
+                (f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1
+            )  # (B,3)
+            K2_inv = torch.stack(
+                (f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1
+            )  # (B,3)
+            fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
+
+        # ------------------------------------------------------------------ #
+        # Layer-4: ℓ2-normalise the 9-vector
+        # ------------------------------------------------------------------ #
+        with DebugTimer("-- ℓ2-normalise the 9-vector"):
+            F_flat = fundamental.reshape(-1, 9)  # (B,9)
+            F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
+            F_normalised = F_flat / F_norm  # (B,9)
+
+        # ------------------------------------------------------------------ #
+        # Layer-5: quadratic loss
+        # ------------------------------------------------------------------ #
+        with DebugTimer("-- quadratic loss"):
+            W_vec = torch.einsum("bij,bj->bi", W, F_normalised)  # (B,9)
+            loss = 0.5 * (F_normalised * W_vec).sum()  # scalar
+
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-5
+        # -------------------------------------------------------------- #
+        d_vec = W_vec  # (B,9)
+
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-4
+        # -------------------------------------------------------------- #
+        with DebugTimer("-- d_F_flat"):
+            d_F_flat = (
+                d_vec - (F_normalised * d_vec).sum(dim=-1, keepdim=True) * F_normalised
+            ) / F_norm  # (B,9)
+            d_F = d_F_flat.view(-1, 3, 3)  # (B,3,3)
+
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-3
+        # -------------------------------------------------------------- #
+        with DebugTimer("-- d_E"):
+            d_E = d_F * K2_inv[:, :, None] * K1_inv[:, None, :]  # (B,3,3)
+
+        with DebugTimer("-- d_f1_inv, d_f2_inv"):
+            d_K1_inv = d_F * essential * K2_inv[:, :, None]  # (B,3,3)
+            d_K2_inv = d_F * essential * K1_inv[:, None, :]  # (B,3,3)
+
+            d_f1_inv = d_K1_inv[:, :, :2].sum((-1, -2))  # (B,)
+            d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
+
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-2
+        # -------------------------------------------------------------- #
+        with DebugTimer("-- d_R_rel, d_t1_x, d_t2_x"):
+            d_R_rel = (
+                d_E @ t1_x.transpose(-1, -2) - t2_x.transpose(-1, -2).contiguous() @ d_E
+            )  # (B,3,3)
+            d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
+            d_t2_x = -d_E @ R_rel.transpose(-1, -2)  # (B,3,3)
+
+        with DebugTimer("-- d_t1, d_t2"):
+            d_t1 = torch.stack(  # (B,3)
+                (
+                    d_t1_x[:, 2, 1] - d_t1_x[:, 1, 2],
+                    d_t1_x[:, 0, 2] - d_t1_x[:, 2, 0],
+                    d_t1_x[:, 1, 0] - d_t1_x[:, 0, 1],
+                ),
+                dim=-1,
+            )
+            d_t2 = torch.stack(  # (B,3)
+                (
+                    d_t2_x[:, 2, 1] - d_t2_x[:, 1, 2],
+                    d_t2_x[:, 0, 2] - d_t2_x[:, 2, 0],
+                    d_t2_x[:, 1, 0] - d_t2_x[:, 0, 1],
+                ),
+                dim=-1,
+            )
+
+        # -------------------------------------------------------------- #
+        # ⇢ Layer-1
+        # -------------------------------------------------------------- #
+        with DebugTimer("-- d_R1, d_R2"):
+            d_R1 = d_R_rel.transpose(-1, -2).contiguous() @ R2  # (B,3,3)
+            d_R2 = d_R_rel @ R1  # (B,3,3)
+
+        # -------------------------------------------------------------- #
+        # Return grads in input order
+        # -------------------------------------------------------------- #
+        return (
+            loss,
+            d_R1,  # R_w2c
+            d_R2,  # R_w2c
+            d_t1,  # t_w2c
+            d_t2,  # t_w2c
+            d_f1_inv,  # inv_focal_scale
+            d_f2_inv,  # inv_focal_scale
+        )
+
+
+class CUDAComputeGradientModule(nn.Module):
     def __init__(self):
         super().__init__()
         # torch.set_float32_matmul_precision("high")
@@ -315,8 +458,11 @@ class ComputeGradientModule(nn.Module):
 
 
 class ComputeGradient:
-    def __init__(self):
-        self.module = ComputeGradientModule().eval()
+    def __init__(self, pure_torch: bool = False):
+        if pure_torch:
+            self.module = TorchComputeGradientModule().eval()
+        else:
+            self.module = CUDAComputeGradientModule().eval()
         # self.module = torch.compile(self.module, mode="max-autotune")
         # self.module = torch.compile(self.module, mode="reduce-overhead")
 
@@ -413,180 +559,6 @@ class ComputeGradient:
             d_t_w2c,  # t_w2c
             d_inv_focal_scale,  # inv_focal_scale
         )  # (num_cameras,)
-
-
-def old_compute_gradients(
-    image_camera_indices: torch.Tensor,  # long (B, 4)
-    R_w2c: torch.Tensor,  # float (N, 3, 3)
-    t_w2c: torch.Tensor,  # float (N, 3)
-    inv_focal_scale: torch.Tensor,  # float (C,)
-    W: torch.Tensor,  # float (B, 9, 9)
-):
-    # make sure everything is contiguous
-    assert image_camera_indices.is_contiguous()
-    assert R_w2c.is_contiguous()
-    assert t_w2c.is_contiguous()
-    assert inv_focal_scale.is_contiguous()
-    assert W.is_contiguous()
-
-    # unbind image and camera indices
-    image_idx1, image_idx2, camera_idx1, camera_idx2 = image_camera_indices.unbind(
-        -1
-    )  # (B,), (B,), (B,), (B,)
-
-    # ------------------------------------------------------------------ #
-    # Layer-1: gather poses & relative rotation
-    # ------------------------------------------------------------------ #
-    R1 = R_w2c.index_select(0, image_idx1)  # (B,3,3)
-    R2 = R_w2c.index_select(0, image_idx2)  # (B,3,3)
-    t1 = t_w2c.index_select(0, image_idx1)  # (B,3)
-    t2 = t_w2c.index_select(0, image_idx2)  # (B,3)
-    R_rel = R2 @ R1.transpose(-1, -2).contiguous()  # (B,3,3)
-
-    # ------------------------------------------------------------------ #
-    # Layer-2: essential matrix
-    # ------------------------------------------------------------------ #
-    t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
-    t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
-    essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
-
-    # ------------------------------------------------------------------ #
-    # Layer-3: fundamental matrix (unnormalised)
-    # ------------------------------------------------------------------ #
-    f1_inv = inv_focal_scale[camera_idx1]  # (B,)
-    f2_inv = inv_focal_scale[camera_idx2]  # (B,)
-    K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)  # (B,3)
-    K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)  # (B,3)
-    fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
-
-    # ------------------------------------------------------------------ #
-    # Layer-4: ℓ2-normalise the 9-vector
-    # ------------------------------------------------------------------ #
-    F_flat = fundamental.reshape(-1, 9)  # (B,9)
-    F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
-    F_normalised = F_flat / F_norm  # (B,9)
-
-    # ------------------------------------------------------------------ #
-    # Layer-5: quadratic loss
-    # ------------------------------------------------------------------ #
-    W_vec = torch.einsum("bij,bj->bi", W, F_normalised)  # (B,9)
-    loss = 0.5 * (F_normalised * W_vec).sum()  # scalar
-
-    # -------------------------------------------------------------- #
-    # ⇢ Layer-5
-    # -------------------------------------------------------------- #
-    d_vec = W_vec  # (B,9)
-
-    # -------------------------------------------------------------- #
-    # ⇢ Layer-4
-    # -------------------------------------------------------------- #
-    d_F_flat = (
-        d_vec - (F_normalised * d_vec).sum(dim=-1, keepdim=True) * F_normalised
-    ) / F_norm  # (B,9)
-    d_F = d_F_flat.view(-1, 3, 3)  # (B,3,3)
-
-    # -------------------------------------------------------------- #
-    # ⇢ Layer-3
-    # -------------------------------------------------------------- #
-    d_E = d_F * K2_inv[:, :, None] * K1_inv[:, None, :]  # (B,3,3)
-    d_K1_inv = d_F * essential * K2_inv[:, :, None]  # (B,3,3)
-    d_K2_inv = d_F * essential * K1_inv[:, None, :]  # (B,3,3)
-
-    d_f1_inv = d_K1_inv[:, :, :2].sum((-1, -2))  # (B,)
-    d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
-
-    num_cam = inv_focal_scale.shape[0]
-
-    if num_cam == 1:
-        # If there is only one camera, we can directly sum the gradients
-        d_f_inv = d_f1_inv.sum() + d_f2_inv.sum()
-        d_f_inv = d_f_inv.view(1)  # (1,)
-    else:
-        d_f_inv = torch.zeros(
-            (num_cam,), device=inv_focal_scale.device, dtype=inv_focal_scale.dtype
-        )  # (C,)
-        d_f_inv.scatter_reduce_(
-            0, camera_idx1, d_f1_inv, reduce="sum", include_self=True
-        )
-        d_f_inv.scatter_reduce_(
-            0, camera_idx2, d_f2_inv, reduce="sum", include_self=True
-        )
-
-    # -------------------------------------------------------------- #
-    # ⇢ Layer-2
-    # -------------------------------------------------------------- #
-    d_R_rel = (
-        d_E @ t1_x.transpose(-1, -2).contiguous()
-        - t2_x.transpose(-1, -2).contiguous() @ d_E
-    )  # (B,3,3)
-    d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
-    d_t2_x = -d_E @ R_rel.transpose(-1, -2).contiguous()  # (B,3,3)
-
-    d_t1 = torch.stack(  # (B,3)
-        (
-            d_t1_x[:, 2, 1] - d_t1_x[:, 1, 2],
-            d_t1_x[:, 0, 2] - d_t1_x[:, 2, 0],
-            d_t1_x[:, 1, 0] - d_t1_x[:, 0, 1],
-        ),
-        dim=-1,
-    )
-    d_t2 = torch.stack(  # (B,3)
-        (
-            d_t2_x[:, 2, 1] - d_t2_x[:, 1, 2],
-            d_t2_x[:, 0, 2] - d_t2_x[:, 2, 0],
-            d_t2_x[:, 1, 0] - d_t2_x[:, 0, 1],
-        ),
-        dim=-1,
-    )
-
-    # -------------------------------------------------------------- #
-    # ⇢ Layer-1
-    # -------------------------------------------------------------- #
-    d_R1 = d_R_rel.transpose(-1, -2).contiguous() @ R2  # (B,3,3)
-    d_R2 = d_R_rel @ R1  # (B,3,3)
-
-    N = len(R_w2c)  # number of images
-    d_R_w2c = torch.zeros((N, 3, 3), device=R_w2c.device, dtype=R_w2c.dtype)  # (N,3,3)
-    d_t_w2c = torch.zeros((N, 3), device=t_w2c.device, dtype=t_w2c.dtype)  # (N,3)
-
-    d_R_w2c.scatter_reduce_(
-        0,
-        image_idx1[:, None, None].expand(-1, 3, 3),
-        d_R1,
-        reduce="sum",
-        include_self=True,
-    )
-    d_R_w2c.scatter_reduce_(
-        0,
-        image_idx2[:, None, None].expand(-1, 3, 3),
-        d_R2,
-        reduce="sum",
-        include_self=True,
-    )
-    d_t_w2c.scatter_reduce_(
-        0,
-        image_idx1[:, None].expand(-1, 3),
-        d_t1,
-        reduce="sum",
-        include_self=True,
-    )
-    d_t_w2c.scatter_reduce_(
-        0,
-        image_idx2[:, None].expand(-1, 3),
-        d_t2,
-        reduce="sum",
-        include_self=True,
-    )
-
-    # -------------------------------------------------------------- #
-    # Return grads in input order
-    # -------------------------------------------------------------- #
-    return (
-        loss,
-        d_R_w2c,  # R_w2c
-        d_t_w2c,  # t_w2c
-        d_f_inv,  # inv_focal_scale
-    )
 
 
 def _compute_fundamental_matrix(
