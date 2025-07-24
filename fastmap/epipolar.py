@@ -8,6 +8,7 @@ from loguru import logger
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.profiler import profile, ProfilerActivity
 
 from fastmap.timer import timer
 from fastmap.container import PointPairs, Cameras, Images
@@ -200,7 +201,7 @@ class TorchComputeGradientModule(nn.Module):
         # ------------------------------------------------------------------ #
         # Layer-1: gather poses & relative rotation
         # ------------------------------------------------------------------ #
-        with DebugTimer("-- gather poses & relative rotation"):
+        with DebugTimer("-- relative rotation"):
             R_rel = R2 @ R1.transpose(-1, -2)  # (B,3,3)
 
         # ------------------------------------------------------------------ #
@@ -343,16 +344,20 @@ class CUDAComputeGradientModule(nn.Module):
         # ------------------------------------------------------------------ #
         # Layer-1: gather poses & relative rotation
         # ------------------------------------------------------------------ #
-        with DebugTimer("-- gt relative rotation"):
-            R_rel = epipolar_gradient(R1=R1, R2=R2, t1=t1, t2=t2, W=W)  # (B,3,3)
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            R_rel = R2 @ R1.transpose(-1, -2)  # (B,3,3)
 
-        # ------------------------------------------------------------------ #
-        # Layer-2: essential matrix
-        # ------------------------------------------------------------------ #
-        with DebugTimer("-- essential matrix"):
+            # ------------------------------------------------------------------ #
+            # Layer-2: essential matrix
+            # ------------------------------------------------------------------ #
             t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
             t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
             essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
+        # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            essential = epipolar_gradient(R1=R1, R2=R2, t1=t1, t2=t2, W=W)  # (B,3,3)
+        # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
 
         # ------------------------------------------------------------------ #
         # Layer-3: fundamental matrix (unnormalised)
