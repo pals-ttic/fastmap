@@ -7,6 +7,6 @@
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "CUDA extension for FastMap";
   m.def("epipolar_gradient", &epipolar_gradient<float>, py::arg("R1"),
-        py::arg("R2"), py::arg("t1"), py::arg("t2"), py::arg("W"),
-        "Compute the epipolar gradient");
+        py::arg("R2"), py::arg("t1"), py::arg("t2"), py::arg("f1_inv"),
+        py::arg("f2_inv"), py::arg("W"), "Compute the epipolar gradient");
 }

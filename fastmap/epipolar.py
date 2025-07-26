@@ -344,40 +344,39 @@ class CUDAComputeGradientModule(nn.Module):
         # ------------------------------------------------------------------ #
         # Layer-1: gather poses & relative rotation
         # ------------------------------------------------------------------ #
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-            R_rel = R2 @ R1.transpose(-1, -2)  # (B,3,3)
+        R_rel = R2 @ R1.transpose(-1, -2)  # (B,3,3)
 
-            # ------------------------------------------------------------------ #
-            # Layer-2: essential matrix
-            # ------------------------------------------------------------------ #
-            t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
-            t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
-            essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
+        # ------------------------------------------------------------------ #
+        # Layer-2: essential matrix
+        # ------------------------------------------------------------------ #
+        t1_x = vector_to_skew_symmetric_matrix(t1)  # (B,3,3)
+        t2_x = vector_to_skew_symmetric_matrix(t2)  # (B,3,3)
+        essential = R_rel @ t1_x - t2_x @ R_rel  # (B,3,3)
         # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
 
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-            essential = epipolar_gradient(R1=R1, R2=R2, t1=t1, t2=t2, W=W)  # (B,3,3)
+        # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        #     essential = epipolar_gradient(R1=R1, R2=R2, t1=t1, t2=t2, W=W)  # (B,3,3)
         # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
 
         # ------------------------------------------------------------------ #
         # Layer-3: fundamental matrix (unnormalised)
         # ------------------------------------------------------------------ #
-        with DebugTimer("-- fundamental matrix (unnormalised)"):
-            K1_inv = torch.stack(
-                (f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1
-            )  # (B,3)
-            K2_inv = torch.stack(
-                (f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1
-            )  # (B,3)
-            fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
+        K1_inv = torch.stack((f1_inv, f1_inv, torch.ones_like(f1_inv)), dim=-1)  # (B,3)
+        K2_inv = torch.stack((f2_inv, f2_inv, torch.ones_like(f2_inv)), dim=-1)  # (B,3)
+        fundamental = K2_inv[:, :, None] * essential * K1_inv[:, None, :]  # (B,3,3)
 
         # ------------------------------------------------------------------ #
         # Layer-4: ℓ2-normalise the 9-vector
         # ------------------------------------------------------------------ #
-        with DebugTimer("-- ℓ2-normalise the 9-vector"):
-            F_flat = fundamental.reshape(-1, 9)  # (B,9)
-            F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
-            F_normalised = F_flat / F_norm  # (B,9)
+        F_flat = fundamental.reshape(-1, 9)  # (B,9)
+        F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
+        F_normalised = F_flat / F_norm  # (B,9)
+
+        # debug: here
+        F_normalised = epipolar_gradient(
+            R1=R1, R2=R2, t1=t1, t2=t2, f1_inv=f1_inv, f2_inv=f2_inv, W=W
+        )  # (B,3,3)
+        F_normalised = F_normalised.view(-1, 9)  # (B,9)
 
         # ------------------------------------------------------------------ #
         # Layer-5: quadratic loss
