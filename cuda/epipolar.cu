@@ -1,5 +1,6 @@
 #include "kernels.h"
 #include <cassert>
+#include <tuple>
 
 // define aliases for shared memory buffers
 // --- Layer 1 ---
@@ -22,6 +23,15 @@
   sharedBuffer3x3b // inplace overwrite essential matrix
 #define LAYER3_FUNDAMENTAL_NORM                                                \
   sharedBuffer1x1a // buffer for fundamental norm (overwrite f1_inv)
+// --- Layer 4 ---
+#define LAYER4_FUNDAMENTAL sharedBuffer3x3b
+#define LAYER4_d_FUNDAMENTAL sharedBuffer3x3a
+#define LAYER4_TEMP                                                            \
+  sharedBuffer3x3c // temporary buffer to store the element wise product of
+                   // fundamental and W @ fundamental
+#define LAYER4_LOSS                                                            \
+  sharedBuffer3x3c[0][0][0] // the first element of this buffer will
+                            // contain the loss value
 
 constexpr int WARP_SIZE = 32;
 constexpr int BATCH_SIZE = 8; // Adjust as needed
@@ -34,6 +44,7 @@ __constant__ float SKEW_SYMMETRIC_SIGN[3][3]{
     {1, 0, -1},
     {-1, 1, 0}}; // Sign matrix for skew-symmetric matrix
 
+// Function to copy contiguous memory from source to target
 __device__ __forceinline__ void
 copyContiguousMemory(const char *__restrict__ sourcePtr,
                      char *__restrict__ targetPtr, int numBytes) {
@@ -44,6 +55,23 @@ copyContiguousMemory(const char *__restrict__ sourcePtr,
   }
 }
 
+// Reduction function to sum elements in a shared memory array and store the
+// result at the first element.
+template <typename T>
+__device__ __forceinline__ void reduceSum(T *__restrict__ startPtr,
+                                          int numElements) {
+  int stride = (numElements + 1) / 2;
+  while (numElements > 1) {
+    if (threadIdx.x < stride && threadIdx.x + stride < numElements) {
+      startPtr[threadIdx.x] += startPtr[threadIdx.x + stride];
+    }
+    __syncthreads();
+    numElements = stride;
+    stride = (numElements + 1) / 2;
+  }
+  return;
+}
+
 template <typename T>
 __global__ void epipolarKernel(
     const T *__restrict__ R1GlobalPtr, const T *__restrict__ R2GlobalPtr,
@@ -52,7 +80,8 @@ __global__ void epipolarKernel(
     const T *__restrict__ WGlobalPtr, T *__restrict__ RrelGlobalPtr,
     T *__restrict__ t1xGlobalPtr, T *__restrict__ t2xGlobalPtr,
     T *__restrict__ essentialGlobalPtr, T *__restrict__ FundamentalGlobalPtr,
-    T *__restrict__ outputGlobalPtr, int numImagePairs) {
+    T *__restrict__ lossGlobalPtr, T *__restrict__ outputGlobalPtr,
+    int numImagePairs) {
 
   const int threadIdxInBlock = threadIdx.x;
   const int numThreadsInBlock = blockDim.x;
@@ -241,8 +270,42 @@ __global__ void epipolarKernel(
                              startImagePairIdx * 9 * sizeof(T),
                          numImagePairsInBatch * sizeof(T) * 9);
     __syncthreads();
+
+    // -------- Layer 4: Compute loss --------
+    // Compute W @ fundamental (which is d_fundamental)
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      LAYER4_d_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] = 0;
+      for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+          LAYER4_d_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] +=
+              WGlobalPtr[(startImagePairIdx + pairIdxInBatch) * 81 +
+                         (rowIdxInBatch * 3 + colIdxInBatch) * 9 +
+                         (i * 3 + j)] *
+              LAYER4_FUNDAMENTAL[pairIdxInBatch][i][j];
+        }
+      }
+    }
+    __syncthreads();
+    // Compute element-wise product of fundamental and W @ fundamental
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      LAYER4_TEMP[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] =
+          0.5 *
+          LAYER4_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] *
+          LAYER4_d_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch];
+    }
+    __syncthreads();
+    // Reduction to compute the loss
+    reduceSum<T>(&LAYER4_TEMP[0][0][0], numImagePairsInBatch * 9);
+    __syncthreads();
+    // write the loss the global memory
+    if (threadIdxInBlock == 0) {
+      atomicAdd(lossGlobalPtr,
+                LAYER4_TEMP[0][0][0]); // atomic add to the loss
+    }
+    __syncthreads();
+
     // debug temp: copy fundamental to output
-    copyContiguousMemory(reinterpret_cast<const char *>(LAYER3_FUNDAMENTAL),
+    copyContiguousMemory(reinterpret_cast<const char *>(LAYER4_d_FUNDAMENTAL),
                          reinterpret_cast<char *>(outputGlobalPtr) +
                              startImagePairIdx * 9 * sizeof(T),
                          numImagePairsInBatch * sizeof(T) * 9);
@@ -251,10 +314,11 @@ __global__ void epipolarKernel(
 
 // Thin C++ wrapper that launches the kernel on the current stream
 template <typename T>
-at::Tensor epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
-                             const at::Tensor &t1, const at::Tensor &t2,
-                             const at::Tensor &f1Inv, const at::Tensor &f2Inv,
-                             const at::Tensor &W) {
+std::tuple<T, at::Tensor>
+epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
+                  const at::Tensor &t1, const at::Tensor &t2,
+                  const at::Tensor &f1Inv, const at::Tensor &f2Inv,
+                  const at::Tensor &W) {
   TORCH_CHECK(R1.is_cuda() && R2.is_cuda() && t1.is_cuda() && t2.is_cuda() &&
                   W.is_cuda(),
               "Tensors must be on CUDA");
@@ -270,11 +334,16 @@ at::Tensor epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
   T *t2xGlobalPtr;         // Global pointer for [t2]_x
   T *essentialGlobalPtr;   // Global pointer for essential matrix
   T *FundamentalGlobalPtr; // Global pointer for fundamental matrix
+  T *lossGlobalPtr;        // Global pointer for loss
   cudaMalloc(&RrelGlobalPtr, numImagePairs * sizeof(T) * 9);
   cudaMalloc(&t1xGlobalPtr, numImagePairs * sizeof(T) * 9);
   cudaMalloc(&t2xGlobalPtr, numImagePairs * sizeof(T) * 9);
   cudaMalloc(&essentialGlobalPtr, numImagePairs * sizeof(T) * 9);
   cudaMalloc(&FundamentalGlobalPtr, numImagePairs * sizeof(T) * 9);
+  cudaMalloc(&lossGlobalPtr, sizeof(T));
+
+  // Set loss to zero in global memory
+  cudaMemset(lossGlobalPtr, 0, sizeof(T));
 
   // Launch the kernel
   epipolarKernel<T>
@@ -282,8 +351,8 @@ at::Tensor epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
           R1.data_ptr<T>(), R2.data_ptr<T>(), t1.data_ptr<T>(),
           t2.data_ptr<T>(), f1Inv.data_ptr<T>(), f2Inv.data_ptr<T>(),
           W.data_ptr<T>(), RrelGlobalPtr, t1xGlobalPtr, t2xGlobalPtr,
-          essentialGlobalPtr, FundamentalGlobalPtr, out.data_ptr<T>(),
-          numImagePairs);
+          essentialGlobalPtr, FundamentalGlobalPtr, lossGlobalPtr,
+          out.data_ptr<T>(), numImagePairs);
 
   // Synchronize to ensure kernel execution is complete
   cudaError_t err = cudaGetLastError();
@@ -293,6 +362,10 @@ at::Tensor epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
   }
   cudaDeviceSynchronize();
 
+  // Copy the loss from global memory to host
+  T loss;
+  cudaMemcpy(&loss, lossGlobalPtr, sizeof(T), cudaMemcpyDeviceToHost);
+
   // Free the allocated buffers
   cudaFree(RrelGlobalPtr);
   cudaFree(t1xGlobalPtr);
@@ -300,11 +373,11 @@ at::Tensor epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
   cudaFree(essentialGlobalPtr);
   cudaFree(FundamentalGlobalPtr);
 
-  return out;
+  return {loss, out};
 }
 
 // Explicit instantiation
-template at::Tensor
+template std::tuple<float, at::Tensor>
 epipolar_gradient<float>(const at::Tensor &R1, const at::Tensor &R2,
                          const at::Tensor &t1, const at::Tensor &t2,
                          const at::Tensor &f1Inv, const at::Tensor &f2Inv,

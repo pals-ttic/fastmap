@@ -372,18 +372,17 @@ class CUDAComputeGradientModule(nn.Module):
         F_norm = F_flat.norm(dim=-1, keepdim=True) + 1e-8  # (B,1)
         F_normalised = F_flat / F_norm  # (B,9)
 
-        # debug: here
-        F_normalised = epipolar_gradient(
-            R1=R1, R2=R2, t1=t1, t2=t2, f1_inv=f1_inv, f2_inv=f2_inv, W=W
-        )  # (B,3,3)
-        F_normalised = F_normalised.view(-1, 9)  # (B,9)
-
         # ------------------------------------------------------------------ #
         # Layer-5: quadratic loss
         # ------------------------------------------------------------------ #
-        with DebugTimer("-- quadratic loss"):
-            W_vec = torch.einsum("bij,bj->bi", W, F_normalised)  # (B,9)
-            loss = 0.5 * (F_normalised * W_vec).sum()  # scalar
+        W_vec = torch.einsum("bij,bj->bi", W, F_normalised)  # (B,9)
+        loss = 0.5 * (F_normalised * W_vec).sum()  # scalar
+
+        # debug: here
+        loss, W_vec = epipolar_gradient(
+            R1=R1, R2=R2, t1=t1, t2=t2, f1_inv=f1_inv, f2_inv=f2_inv, W=W
+        )  # (B,3,3)
+        W_vec = W_vec.reshape(-1, 9)  # (B,9)
 
         # -------------------------------------------------------------- #
         # ⇢ Layer-5
@@ -827,6 +826,8 @@ def loop(
                             inv_focal_scale=inv_focal_scale,  # (num_cameras,)
                             W=W,
                         )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
+                    if isinstance(loss, torch.Tensor):
+                        loss = loss.item()  # convert to scalar
 
                 # backprop
                 with DebugTimer("jiahao debug zero_grad"):
@@ -857,7 +858,7 @@ def loop(
                 # log
                 if iter_idx % log_interval == 0:
                     logger.info(
-                        f"[Iter {iter_idx} ({precision})] loss={loss.item():.8f}, moving_loss={moving_loss:.8f}"
+                        f"[Iter {iter_idx} ({precision})] loss={loss:.8f}, moving_loss={moving_loss:.8f}"
                     )
 
     ##### Get the results and convert to the original dtype #####

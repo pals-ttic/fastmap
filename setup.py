@@ -37,6 +37,7 @@ setup(
                     # Uncomment & tweak for specific GPU arch if desired:
                     # "-gencode=arch=compute_80,code=sm_80",
                 ],
+                # "nvcc": ["-O0", "-g", "-lineinfo"],
             },
         )
     ],
