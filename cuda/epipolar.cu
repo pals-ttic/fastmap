@@ -636,7 +636,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
 epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
                   const at::Tensor &t1, const at::Tensor &t2,
                   const at::Tensor &f1Inv, const at::Tensor &f2Inv,
-                  const at::Tensor &W) {
+                  const at::Tensor &W, at::Tensor &loss, at::Tensor &dR1,
+                  at::Tensor &dR2, at::Tensor &dt1, at::Tensor &dt2,
+                  at::Tensor &dF1Inv, at::Tensor &dF2Inv,
+                  at::Tensor &bufferRrel, at::Tensor &buffert1x,
+                  at::Tensor &buffert2x, at::Tensor &bufferEssential,
+                  at::Tensor &bufferFundamental) {
   TORCH_CHECK(R1.is_cuda() && R2.is_cuda() && t1.is_cuda() && t2.is_cuda() &&
                   W.is_cuda(),
               "Tensors must be on CUDA");
@@ -645,34 +650,17 @@ epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
   constexpr int numThreadsPerBlock = BATCH_SIZE * 3 * 3;
   const int numBlocks = 1024;
 
-  // Initialize output tensor
-  auto loss = at::zeros({1}, R1.options());
-  auto dR1 = at::empty_like(R1);
-  auto dR2 = at::empty_like(R2);
-  auto dt1 = at::empty_like(t1);
-  auto dt2 = at::empty_like(t2);
-  auto dF1Inv = at::empty_like(f1Inv);
-  auto dF2Inv = at::empty_like(f2Inv);
-
-  // Allocae temporary buffers on HBM
-  T *RrelGlobalPtr;        // Global pointer for R_rel
-  T *t1xGlobalPtr;         // Global pointer for [t1]_x
-  T *t2xGlobalPtr;         // Global pointer for [t2]_x
-  T *essentialGlobalPtr;   // Global pointer for essential matrix
-  T *FundamentalGlobalPtr; // Global pointer for fundamental matrix
-  cudaMalloc(&RrelGlobalPtr, numImagePairs * sizeof(T) * 9);
-  cudaMalloc(&t1xGlobalPtr, numImagePairs * sizeof(T) * 9);
-  cudaMalloc(&t2xGlobalPtr, numImagePairs * sizeof(T) * 9);
-  cudaMalloc(&essentialGlobalPtr, numImagePairs * sizeof(T) * 9);
-  cudaMalloc(&FundamentalGlobalPtr, numImagePairs * sizeof(T) * 9);
+  // Set loss tensor to zero
+  loss.zero_();
 
   // Launch the kernel
   epipolarKernel<T>
       <<<numBlocks, numThreadsPerBlock, 0, at::cuda::getCurrentCUDAStream()>>>(
           R1.data_ptr<T>(), R2.data_ptr<T>(), t1.data_ptr<T>(),
           t2.data_ptr<T>(), f1Inv.data_ptr<T>(), f2Inv.data_ptr<T>(),
-          W.data_ptr<T>(), RrelGlobalPtr, t1xGlobalPtr, t2xGlobalPtr,
-          essentialGlobalPtr, FundamentalGlobalPtr, loss.data_ptr<T>(),
+          W.data_ptr<T>(), bufferRrel.data_ptr<T>(), buffert1x.data_ptr<T>(),
+          buffert2x.data_ptr<T>(), bufferEssential.data_ptr<T>(),
+          bufferFundamental.data_ptr<T>(), loss.data_ptr<T>(),
           dR1.data_ptr<T>(), dR2.data_ptr<T>(), dt1.data_ptr<T>(),
           dt2.data_ptr<T>(), dF1Inv.data_ptr<T>(), dF2Inv.data_ptr<T>(),
           numImagePairs);
@@ -685,13 +673,6 @@ epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
   }
   cudaDeviceSynchronize();
 
-  // Free the allocated buffers
-  cudaFree(RrelGlobalPtr);
-  cudaFree(t1xGlobalPtr);
-  cudaFree(t2xGlobalPtr);
-  cudaFree(essentialGlobalPtr);
-  cudaFree(FundamentalGlobalPtr);
-
   return {loss, dR1, dR2, dt1, dt2, dF1Inv, dF2Inv};
 }
 
@@ -701,4 +682,9 @@ template std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
 epipolar_gradient<float>(const at::Tensor &R1, const at::Tensor &R2,
                          const at::Tensor &t1, const at::Tensor &t2,
                          const at::Tensor &f1Inv, const at::Tensor &f2Inv,
-                         const at::Tensor &W);
+                         const at::Tensor &W, at::Tensor &loss, at::Tensor &dR1,
+                         at::Tensor &dR2, at::Tensor &dt1, at::Tensor &dt2,
+                         at::Tensor &dF1Inv, at::Tensor &dF2Inv,
+                         at::Tensor &bufferRrel, at::Tensor &buffert1x,
+                         at::Tensor &buffert2x, at::Tensor &bufferEssential,
+                         at::Tensor &bufferFundamental);

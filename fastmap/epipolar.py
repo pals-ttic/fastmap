@@ -318,8 +318,7 @@ class TorchComputeGradientModule(nn.Module):
 class CUDAComputeGradientModule(nn.Module):
     def __init__(self):
         super().__init__()
-        # torch.set_float32_matmul_precision("high")
-        pass
+        self._initialized = False
 
     @torch.no_grad()
     def forward(
@@ -332,17 +331,69 @@ class CUDAComputeGradientModule(nn.Module):
         f2_inv: torch.Tensor,  # float (B,)
         W: torch.Tensor,  # float (B, 9, 9)
     ):
-        loss, d_R1, d_R2, d_t1, d_t2, d_f1_inv, d_f2_inv = epipolar_gradient(
-            R1=R1, R2=R2, t1=t1, t2=t2, f1_inv=f1_inv, f2_inv=f2_inv, W=W
-        )  # (B,3,3)
+        if not self._initialized:
+            # make sure everything is contiguous
+            assert R1.is_contiguous()
+            assert R2.is_contiguous()
+            assert t1.is_contiguous()
+            assert t2.is_contiguous()
+            assert f1_inv.is_contiguous()
+            assert f2_inv.is_contiguous()
+            assert W.is_contiguous()
+
+            # get device and dtype
+            device = R1.device
+            dtype = R1.dtype
+
+            # initialize the output tensors
+            self.loss = torch.zeros((1,), device=device, dtype=dtype)  # scalar
+            self.d_R1 = torch.zeros_like(R1)  # (B,3,3)
+            self.d_R2 = torch.zeros_like(R2)  # (B,3,3)
+            self.d_t1 = torch.zeros_like(t1)  # (B,3)
+            self.d_t2 = torch.zeros_like(t2)  # (B,3)
+            self.d_f1_inv = torch.zeros_like(f1_inv)  # (B,)
+            self.d_f2_inv = torch.zeros_like(f2_inv)  # (B,)
+
+            # initialize the buffers
+            self.buffer_R_rel = torch.zeros_like(R1)  # (B,3,3)
+            self.buffer_t1_x = torch.zeros_like(R1)  # (B,3,3)
+            self.buffer_t2_x = torch.zeros_like(R1)  # (B,3,3)
+            self.buffer_essential = torch.zeros_like(R1)  # (B,3,3)
+            self.buffer_fundamental = torch.zeros_like(R1)  # (B,3,3)
+
+            # set flag
+            self._initialized = True
+
+        epipolar_gradient(
+            R1=R1,
+            R2=R2,
+            t1=t1,
+            t2=t2,
+            f1_inv=f1_inv,
+            f2_inv=f2_inv,
+            W=W,
+            loss=self.loss,
+            d_R1=self.d_R1,
+            d_R2=self.d_R2,
+            d_t1=self.d_t1,
+            d_t2=self.d_t2,
+            d_f1_inv=self.d_f1_inv,
+            d_f2_inv=self.d_f2_inv,
+            buffer_R_rel=self.buffer_R_rel,
+            buffer_t1_x=self.buffer_t1_x,
+            buffer_t2_x=self.buffer_t2_x,
+            buffer_essential=self.buffer_essential,
+            buffer_fundamental=self.buffer_fundamental,
+        )
+
         return (
-            loss,
-            d_R1,  # R_w2c
-            d_R2,  # R_w2c
-            d_t1,  # t_w2c
-            d_t2,  # t_w2c
-            d_f1_inv,  # inv_focal_scale
-            d_f2_inv,  # inv_focal_scale
+            self.loss,
+            self.d_R1,  # R_w2c
+            self.d_R2,  # R_w2c
+            self.d_t1,  # t_w2c
+            self.d_t2,  # t_w2c
+            self.d_f1_inv,  # inv_focal_scale
+            self.d_f2_inv,  # inv_focal_scale
         )
 
 
