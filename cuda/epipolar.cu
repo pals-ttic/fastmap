@@ -55,12 +55,21 @@
 #define LAYER7_F1_INV sharedBuffer1x1a
 #define LAYER7_F2_INV sharedBuffer1x1b
 // --- Layer 8 ---
-#define LAYER7_d_ESSENTIAL sharedBuffer3x3b
-#define LAYER7_R_REL sharedBuffer3x3c
-#define LAYER7_d_T1X sharedBuffer3x3a
-#define LAYER7_d_T2X sharedBuffer3x3a // re-use buffer for t1_x and t2_x
-#define LAYER7_d_T1 sharedBuffer3x1a
-#define LAYER7_d_T2 sharedBuffer3x1a // re-use buffer for d_t1 and d_t2
+#define LAYER8_d_ESSENTIAL sharedBuffer3x3b
+#define LAYER8_R_REL sharedBuffer3x3c
+#define LAYER8_d_T1X sharedBuffer3x3a
+#define LAYER8_d_T2X sharedBuffer3x3a // re-use buffer for t1_x and t2_x
+#define LAYER8_d_T1 sharedBuffer3x1a
+#define LAYER8_d_T2 sharedBuffer3x1a // re-use buffer for d_t1 and d_t2
+// --- Layer 9 ---
+#define LAYER9_d_ESSENTIAL sharedBuffer3x3b
+#define LAYER9_d_R_REL sharedBuffer3x3a
+#define LAYER9_T1X sharedBuffer3x3c
+#define LAYER9_T2X sharedBuffer3x3c // re-use buffer for t1_x and t2_x
+#define LAYER9_R2 sharedBuffer3x3b
+#define LAYER9_d_R1 sharedBuffer3x3c
+#define LAYER9_R1 sharedBuffer3x3b   // re-use buffer for R1 and R2
+#define LAYER9_d_R2 sharedBuffer3x3c // re-use buffer for d_R1 and d_R2
 
 constexpr int WARP_SIZE = 32;
 constexpr int BATCH_SIZE = 8; // Adjust as needed
@@ -460,16 +469,16 @@ __global__ void epipolarKernel(
     // Copy R_rel to shared memory
     copyContiguousMemory(reinterpret_cast<const char *>(RrelGlobalPtr) +
                              startImagePairIdx * 9 * sizeof(T),
-                         reinterpret_cast<char *>(LAYER7_R_REL),
+                         reinterpret_cast<char *>(LAYER8_R_REL),
                          numImagePairsInBatch * sizeof(T) * 9);
     __syncthreads();
     // Compute d_t1_x
     if (threadIdxInBlock < minNumThreadsInBlock) {
-      LAYER7_d_T1X[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] = 0;
+      LAYER8_d_T1X[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] = 0;
       for (int i = 0; i < 3; i++) {
-        LAYER7_d_T1X[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] +=
-            LAYER7_R_REL[pairIdxInBatch][i][rowIdxInBatch] *
-            LAYER7_d_ESSENTIAL[pairIdxInBatch][i]
+        LAYER8_d_T1X[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] +=
+            LAYER8_R_REL[pairIdxInBatch][i][rowIdxInBatch] *
+            LAYER8_d_ESSENTIAL[pairIdxInBatch][i]
                               [colIdxInBatch]; // Note that R_rel is transposed
       }
     }
@@ -478,36 +487,36 @@ __global__ void epipolarKernel(
     if (threadIdxInBlock < minNumThreadsInBlock) {
       if (rowIdxInBatch == 0) {
         if (colIdxInBatch == 0) {
-          LAYER7_d_T1[pairIdxInBatch][colIdxInBatch] =
-              LAYER7_d_T1X[pairIdxInBatch][2][1] -
-              LAYER7_d_T1X[pairIdxInBatch][1][2];
+          LAYER8_d_T1[pairIdxInBatch][colIdxInBatch] =
+              LAYER8_d_T1X[pairIdxInBatch][2][1] -
+              LAYER8_d_T1X[pairIdxInBatch][1][2];
         }
         if (colIdxInBatch == 1) {
-          LAYER7_d_T1[pairIdxInBatch][colIdxInBatch] =
-              LAYER7_d_T1X[pairIdxInBatch][0][2] -
-              LAYER7_d_T1X[pairIdxInBatch][2][0];
+          LAYER8_d_T1[pairIdxInBatch][colIdxInBatch] =
+              LAYER8_d_T1X[pairIdxInBatch][0][2] -
+              LAYER8_d_T1X[pairIdxInBatch][2][0];
         }
         if (colIdxInBatch == 2) {
-          LAYER7_d_T1[pairIdxInBatch][colIdxInBatch] =
-              LAYER7_d_T1X[pairIdxInBatch][1][0] -
-              LAYER7_d_T1X[pairIdxInBatch][0][1];
+          LAYER8_d_T1[pairIdxInBatch][colIdxInBatch] =
+              LAYER8_d_T1X[pairIdxInBatch][1][0] -
+              LAYER8_d_T1X[pairIdxInBatch][0][1];
         }
       }
     }
     __syncthreads();
     // Write d_t1 to global memory
-    copyContiguousMemory(reinterpret_cast<const char *>(LAYER7_d_T1),
+    copyContiguousMemory(reinterpret_cast<const char *>(LAYER8_d_T1),
                          reinterpret_cast<char *>(dt1GlobalPtr) +
                              startImagePairIdx * 3 * sizeof(T),
                          numImagePairsInBatch * sizeof(T) * 3);
     __syncthreads();
     // Compute d_t1_x
     if (threadIdxInBlock < minNumThreadsInBlock) {
-      LAYER7_d_T2X[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] = 0;
+      LAYER8_d_T2X[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] = 0;
       for (int j = 0; j < 3; j++) {
-        LAYER7_d_T2X[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] -=
-            LAYER7_d_ESSENTIAL[pairIdxInBatch][rowIdxInBatch][j] *
-            LAYER7_R_REL[pairIdxInBatch][colIdxInBatch]
+        LAYER8_d_T2X[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] -=
+            LAYER8_d_ESSENTIAL[pairIdxInBatch][rowIdxInBatch][j] *
+            LAYER8_R_REL[pairIdxInBatch][colIdxInBatch]
                         [j]; // Note that R_rel is transposed
       }
     }
@@ -516,34 +525,107 @@ __global__ void epipolarKernel(
     if (threadIdxInBlock < minNumThreadsInBlock) {
       if (rowIdxInBatch == 0) {
         if (colIdxInBatch == 0) {
-          LAYER7_d_T2[pairIdxInBatch][colIdxInBatch] =
-              LAYER7_d_T2X[pairIdxInBatch][2][1] -
-              LAYER7_d_T2X[pairIdxInBatch][1][2];
+          LAYER8_d_T2[pairIdxInBatch][colIdxInBatch] =
+              LAYER8_d_T2X[pairIdxInBatch][2][1] -
+              LAYER8_d_T2X[pairIdxInBatch][1][2];
         }
         if (colIdxInBatch == 1) {
-          LAYER7_d_T2[pairIdxInBatch][colIdxInBatch] =
-              LAYER7_d_T2X[pairIdxInBatch][0][2] -
-              LAYER7_d_T2X[pairIdxInBatch][2][0];
+          LAYER8_d_T2[pairIdxInBatch][colIdxInBatch] =
+              LAYER8_d_T2X[pairIdxInBatch][0][2] -
+              LAYER8_d_T2X[pairIdxInBatch][2][0];
         }
         if (colIdxInBatch == 2) {
-          LAYER7_d_T2[pairIdxInBatch][colIdxInBatch] =
-              LAYER7_d_T2X[pairIdxInBatch][1][0] -
-              LAYER7_d_T2X[pairIdxInBatch][0][1];
+          LAYER8_d_T2[pairIdxInBatch][colIdxInBatch] =
+              LAYER8_d_T2X[pairIdxInBatch][1][0] -
+              LAYER8_d_T2X[pairIdxInBatch][0][1];
         }
       }
     }
     __syncthreads();
     // Write d_t2 to global memory
-    copyContiguousMemory(reinterpret_cast<const char *>(LAYER7_d_T2),
+    copyContiguousMemory(reinterpret_cast<const char *>(LAYER8_d_T2),
                          reinterpret_cast<char *>(dt2GlobalPtr) +
                              startImagePairIdx * 3 * sizeof(T),
                          numImagePairsInBatch * sizeof(T) * 3);
+    __syncthreads();
 
-    // debug:
-    copyContiguousMemory(reinterpret_cast<const char *>(LAYER7_d_ESSENTIAL),
+    // -------- Layer 9: Compute d_R1, d_R2 --------
+    // Load t1_x and t2_x and compute d_R_rel
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      LAYER9_d_R_REL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] = 0;
+    }
+    __syncthreads();
+    copyContiguousMemory(reinterpret_cast<const char *>(t1xGlobalPtr) +
+                             startImagePairIdx * 9 * sizeof(T),
+                         reinterpret_cast<char *>(LAYER9_T1X),
+                         numImagePairsInBatch * sizeof(T) * 9);
+    __syncthreads();
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      for (int j = 0; j < 3; j++) {
+        LAYER9_d_R_REL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] +=
+            LAYER9_d_ESSENTIAL[pairIdxInBatch][rowIdxInBatch][j] *
+            LAYER9_T1X[pairIdxInBatch][colIdxInBatch]
+                      [j]; // Note that t1_x is transposed
+      }
+    }
+    __syncthreads();
+    copyContiguousMemory(reinterpret_cast<const char *>(t2xGlobalPtr) +
+                             startImagePairIdx * 9 * sizeof(T),
+                         reinterpret_cast<char *>(LAYER9_T2X),
+                         numImagePairsInBatch * sizeof(T) * 9);
+    __syncthreads();
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      for (int i = 0; i < 3; i++) {
+        LAYER9_d_R_REL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] -=
+            LAYER9_T2X[pairIdxInBatch][i][rowIdxInBatch] *
+            LAYER9_d_ESSENTIAL[pairIdxInBatch][i]
+                              [colIdxInBatch]; // Note that t2_x is transposed
+      }
+    }
+    __syncthreads();
+    // Load R2 and compute d_R1
+    copyContiguousMemory(reinterpret_cast<const char *>(R2GlobalPtr) +
+                             startImagePairIdx * 9 * sizeof(T),
+                         reinterpret_cast<char *>(LAYER9_R2),
+                         numImagePairsInBatch * sizeof(T) * 9);
+    __syncthreads();
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      LAYER9_d_R1[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] = 0;
+      for (int i = 0; i < 3; i++) {
+        LAYER9_d_R1[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] +=
+            LAYER9_d_R_REL[pairIdxInBatch][i][rowIdxInBatch] *
+            LAYER9_R2[pairIdxInBatch][i]
+                     [colIdxInBatch]; // Note that R_rel is transposed
+      }
+    }
+    __syncthreads();
+    // Write d_R1 to global memory
+    copyContiguousMemory(reinterpret_cast<const char *>(LAYER9_d_R1),
                          reinterpret_cast<char *>(dR1GlobalPtr) +
                              startImagePairIdx * 9 * sizeof(T),
                          numImagePairsInBatch * sizeof(T) * 9);
+    __syncthreads();
+    // Load R1 and compute d_R2
+    copyContiguousMemory(reinterpret_cast<const char *>(R1GlobalPtr) +
+                             startImagePairIdx * 9 * sizeof(T),
+                         reinterpret_cast<char *>(LAYER9_R1),
+                         numImagePairsInBatch * sizeof(T) * 9);
+    __syncthreads();
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      LAYER9_d_R2[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] = 0;
+      for (int i = 0; i < 3; i++) {
+        LAYER9_d_R2[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] +=
+            LAYER9_d_R_REL[pairIdxInBatch][rowIdxInBatch][i] *
+            LAYER9_R1[pairIdxInBatch][i][colIdxInBatch];
+      }
+    }
+    __syncthreads();
+    // Write d_R2 to global memory
+    copyContiguousMemory(reinterpret_cast<const char *>(LAYER9_d_R2),
+                         reinterpret_cast<char *>(dR2GlobalPtr) +
+                             startImagePairIdx * 9 * sizeof(T),
+                         numImagePairsInBatch * sizeof(T) * 9);
+    __syncthreads();
   }
 }
 
