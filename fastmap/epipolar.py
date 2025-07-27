@@ -404,38 +404,37 @@ class CUDAComputeGradientModule(nn.Module):
             d_f1_inv = d_K1_inv[:, :, :2].sum((-1, -2))  # (B,)
             d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
 
-        # debug: here
-        loss, _, _, _, _, d_f1_inv, d_f2_inv = epipolar_gradient(
-            R1=R1, R2=R2, t1=t1, t2=t2, f1_inv=f1_inv, f2_inv=f2_inv, W=W
-        )  # (B,3,3)
-
         # -------------------------------------------------------------- #
         # ⇢ Layer-2
         # -------------------------------------------------------------- #
-        with DebugTimer("-- d_R_rel, d_t1_x, d_t2_x"):
-            d_R_rel = (
-                d_E @ t1_x.transpose(-1, -2) - t2_x.transpose(-1, -2).contiguous() @ d_E
-            )  # (B,3,3)
-            d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
-            d_t2_x = -d_E @ R_rel.transpose(-1, -2)  # (B,3,3)
+        d_t1_x = R_rel.transpose(-1, -2).contiguous() @ d_E  # (B,3,3)
+        d_t2_x = -d_E @ R_rel.transpose(-1, -2)  # (B,3,3)
 
-        with DebugTimer("-- d_t1, d_t2"):
-            d_t1 = torch.stack(  # (B,3)
-                (
-                    d_t1_x[:, 2, 1] - d_t1_x[:, 1, 2],
-                    d_t1_x[:, 0, 2] - d_t1_x[:, 2, 0],
-                    d_t1_x[:, 1, 0] - d_t1_x[:, 0, 1],
-                ),
-                dim=-1,
-            )
-            d_t2 = torch.stack(  # (B,3)
-                (
-                    d_t2_x[:, 2, 1] - d_t2_x[:, 1, 2],
-                    d_t2_x[:, 0, 2] - d_t2_x[:, 2, 0],
-                    d_t2_x[:, 1, 0] - d_t2_x[:, 0, 1],
-                ),
-                dim=-1,
-            )
+        d_t1 = torch.stack(  # (B,3)
+            (
+                d_t1_x[:, 2, 1] - d_t1_x[:, 1, 2],
+                d_t1_x[:, 0, 2] - d_t1_x[:, 2, 0],
+                d_t1_x[:, 1, 0] - d_t1_x[:, 0, 1],
+            ),
+            dim=-1,
+        )
+        d_t2 = torch.stack(  # (B,3)
+            (
+                d_t2_x[:, 2, 1] - d_t2_x[:, 1, 2],
+                d_t2_x[:, 0, 2] - d_t2_x[:, 2, 0],
+                d_t2_x[:, 1, 0] - d_t2_x[:, 0, 1],
+            ),
+            dim=-1,
+        )
+
+        # debug: here
+        loss, _, _, d_t1, d_t2, d_f1_inv, d_f2_inv = epipolar_gradient(
+            R1=R1, R2=R2, t1=t1, t2=t2, f1_inv=f1_inv, f2_inv=f2_inv, W=W
+        )  # (B,3,3)
+
+        d_R_rel = (
+            d_E @ t1_x.transpose(-1, -2) - t2_x.transpose(-1, -2).contiguous() @ d_E
+        )  # (B,3,3)
 
         # -------------------------------------------------------------- #
         # ⇢ Layer-1
