@@ -66,7 +66,9 @@ def estimate_fundamental(
     )  # (num_image_pairs, 9, 9)
 
     ##### Solve the fundamental matrix #####
-    fundamental = torch.linalg.svd(constraint).Vh[:, -1]  # (num_image_pairs, 9)
+    fundamental = torch.linalg.eigh(constraint).eigenvectors[
+        ..., 0
+    ]  # (num_image_pairs, 9)
     fundamental = fundamental.reshape(-1, 3, 3)  # (num_image_pairs, 3, 3)
     fundamental = normalize_matrix(fundamental)  # (num_image_pairs, 3, 3)
 

@@ -362,7 +362,7 @@ def _estimate_homography(
 
     # solve
     homography = (
-        torch.linalg.svd(AT_A).Vh[:, -1, :].view(num_image_pairs, 3, 3)
+        torch.linalg.eigh(AT_A).eigenvectors[..., 0].view(num_image_pairs, 3, 3)
     )  # (num_image_pairs, 3, 3)
     homography = normalize_matrix(homography)  # (num_image_pairs, 3, 3)
     homography[~matches_data.image_pair_mask] = torch.nan  # (num_image_pairs, 3, 3)
