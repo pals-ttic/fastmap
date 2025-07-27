@@ -40,6 +40,20 @@
 #define LAYER5_TEMP                                                            \
   sharedBuffer1x1b // temporary buffer to store the dot product of F and d_F
 #define LAYER5_d_UNNORMALIZED_FUNDAMENTAL sharedBuffer3x3c
+// --- Layer 6 ---
+#define LAYER6_d_UNNORMALIZED_FUNDAMENTAL sharedBuffer3x3c
+#define LAYER6_ESSENTIAL sharedBuffer3x3b
+#define LAYER6_d_K1_INV sharedBuffer3x3a
+#define LAYER6_F1_INV sharedBuffer1x1a
+#define LAYER6_d_F1_INV sharedBuffer1x1b
+#define LAYER6_d_K2_INV sharedBuffer3x3a // re-use buffer for f1 and f2
+#define LAYER6_F2_INV sharedBuffer1x1a   // re use buffer for f1 and f2
+#define LAYER6_d_F2_INV sharedBuffer1x1b // re use buffer for f1 and f2
+// --- Layer 7 ---
+#define LAYER7_d_UNNORMALIZED_FUNDAMENTAL sharedBuffer3x3c
+#define LAYER7_d_ESSENTIAL sharedBuffer3x3b
+#define LAYER7_F1_INV sharedBuffer1x1a
+#define LAYER7_F2_INV sharedBuffer1x1b
 
 constexpr int WARP_SIZE = 32;
 constexpr int BATCH_SIZE = 8; // Adjust as needed
@@ -88,8 +102,10 @@ __global__ void epipolarKernel(
     const T *__restrict__ WGlobalPtr, T *__restrict__ RrelGlobalPtr,
     T *__restrict__ t1xGlobalPtr, T *__restrict__ t2xGlobalPtr,
     T *__restrict__ essentialGlobalPtr, T *__restrict__ FundamentalGlobalPtr,
-    T *__restrict__ lossGlobalPtr, T *__restrict__ outputGlobalPtr,
-    int numImagePairs) {
+    T *__restrict__ lossGlobalPtr, T *__restrict__ dR1GlobalPtr,
+    T *__restrict__ dR2GlobalPtr, T *__restrict__ dt1GlobalPtr,
+    T *__restrict__ dt2GlobalPtr, T *__restrict__ dF1InvGlobalPtr,
+    T *__restrict__ dF2InvGlobalPtr, int numImagePairs) {
 
   const int threadIdxInBlock = threadIdx.x;
   const int numThreadsInBlock = blockDim.x;
@@ -323,13 +339,6 @@ __global__ void epipolarKernel(
       }
     }
     __syncthreads();
-    // copyContiguousMemory( // debug temp: copy fundamental norm to output
-    //     reinterpret_cast<const char *>(LAYER5_FUNDAMENTAL_NORM),
-    //     reinterpret_cast<char *>(outputGlobalPtr) +
-    //         startImagePairIdx * sizeof(T) * 1,
-    //     numImagePairsInBatch * sizeof(T) * 1);
-    // __syncthreads(); // debug temp: copy fundamental norm to output
-    // continue;        // debug temp: continue to next iteration
     // Compute gradient with respect to unnormalized fundamental matrix
     if (threadIdxInBlock < minNumThreadsInBlock) {
       LAYER5_d_UNNORMALIZED_FUNDAMENTAL
@@ -342,17 +351,116 @@ __global__ void epipolarKernel(
               LAYER5_FUNDAMENTAL_NORM[pairIdxInBatch];
     }
     __syncthreads();
-    copyContiguousMemory(
-        reinterpret_cast<const char *>(LAYER5_d_UNNORMALIZED_FUNDAMENTAL),
-        reinterpret_cast<char *>(outputGlobalPtr) +
-            startImagePairIdx * 9 * sizeof(T),
-        numImagePairsInBatch * sizeof(T) * 9);
+
+    // -------- Layer 6: Compute d_f1_inv, d_f2_inv --------
+    // Copy essential to shared memory
+    copyContiguousMemory(reinterpret_cast<const char *>(essentialGlobalPtr) +
+                             startImagePairIdx * 9 * sizeof(T),
+                         reinterpret_cast<char *>(LAYER6_ESSENTIAL),
+                         numImagePairsInBatch * sizeof(T) * 9);
+    __syncthreads();
+    // copy f2_inv to shared memory (for computing d_f1_inv)
+    copyContiguousMemory(reinterpret_cast<const char *>(f2InvGlobalPtr) +
+                             startImagePairIdx * sizeof(T) * 1,
+                         reinterpret_cast<char *>(LAYER6_F2_INV),
+                         numImagePairsInBatch * sizeof(T) * 1);
+    __syncthreads();
+    // Compute d_K1_inv
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      LAYER6_d_K1_INV[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] =
+          LAYER6_d_UNNORMALIZED_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch]
+                                           [colIdxInBatch] *
+          LAYER6_ESSENTIAL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] *
+          (rowIdxInBatch == 2 ? 1.0 : LAYER6_F2_INV[pairIdxInBatch]);
+    }
+    __syncthreads();
+    // Compute d_f1_inv
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      if (rowIdxInBatch == 0 && colIdxInBatch == 0) {
+        LAYER6_d_F1_INV[pairIdxInBatch] = 0;
+        for (int i = 0; i < 3; i++) {
+          for (int j = 0; j < 2; j++) {
+            LAYER6_d_F1_INV[pairIdxInBatch] +=
+                LAYER6_d_K1_INV[pairIdxInBatch][i][j];
+          }
+        }
+      }
+    }
+    __syncthreads();
+    // Write d_f1_inv to global memory
+    copyContiguousMemory(reinterpret_cast<const char *>(LAYER6_d_F1_INV),
+                         reinterpret_cast<char *>(dF1InvGlobalPtr) +
+                             startImagePairIdx * sizeof(T),
+                         numImagePairsInBatch * sizeof(T));
+    __syncthreads();
+    // copy f1_inv to shared memory (for computing d_f2_inv)
+    copyContiguousMemory(reinterpret_cast<const char *>(f1InvGlobalPtr) +
+                             startImagePairIdx * sizeof(T) * 1,
+                         reinterpret_cast<char *>(LAYER6_F1_INV),
+                         numImagePairsInBatch * sizeof(T) * 1);
+    __syncthreads();
+    // Compute d_K2_inv
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      LAYER6_d_K2_INV[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] =
+          LAYER6_d_UNNORMALIZED_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch]
+                                           [colIdxInBatch] *
+          LAYER6_ESSENTIAL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] *
+          (colIdxInBatch == 2 ? 1.0 : LAYER6_F1_INV[pairIdxInBatch]);
+    }
+    __syncthreads();
+    // Compute d_f2_inv
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      if (rowIdxInBatch == 0 && colIdxInBatch == 0) {
+        LAYER6_d_F2_INV[pairIdxInBatch] = 0;
+        for (int i = 0; i < 2; i++) {
+          for (int j = 0; j < 3; j++) {
+            LAYER6_d_F2_INV[pairIdxInBatch] +=
+                LAYER6_d_K2_INV[pairIdxInBatch][i][j];
+          }
+        }
+      }
+    }
+    __syncthreads();
+    // Write d_f2_inv to global memory
+    copyContiguousMemory(reinterpret_cast<const char *>(LAYER6_d_F2_INV),
+                         reinterpret_cast<char *>(dF2InvGlobalPtr) +
+                             startImagePairIdx * sizeof(T),
+                         numImagePairsInBatch * sizeof(T));
+    __syncthreads();
+
+    // -------- Layer 7: Compute d_essential --------
+    // copy f1_inv and f2_inv to shared memory
+    copyContiguousMemory(reinterpret_cast<const char *>(f1InvGlobalPtr) +
+                             startImagePairIdx * sizeof(T) * 1,
+                         reinterpret_cast<char *>(LAYER7_F1_INV),
+                         numImagePairsInBatch * sizeof(T) * 1);
+    copyContiguousMemory(reinterpret_cast<const char *>(f2InvGlobalPtr) +
+                             startImagePairIdx * sizeof(T) * 1,
+                         reinterpret_cast<char *>(LAYER7_F2_INV),
+                         numImagePairsInBatch * sizeof(T) * 1);
+    __syncthreads();
+    // compute d_essential
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      LAYER7_d_ESSENTIAL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] =
+          LAYER7_d_UNNORMALIZED_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch]
+                                           [colIdxInBatch] *
+          (colIdxInBatch == 2 ? 1.0 : LAYER7_F1_INV[pairIdxInBatch]) *
+          (rowIdxInBatch == 2 ? 1.0 : LAYER7_F2_INV[pairIdxInBatch]);
+    }
+    __syncthreads();
+
+    // debug:
+    copyContiguousMemory(reinterpret_cast<const char *>(LAYER7_d_ESSENTIAL),
+                         reinterpret_cast<char *>(dR1GlobalPtr) +
+                             startImagePairIdx * 9 * sizeof(T),
+                         numImagePairsInBatch * sizeof(T) * 9);
   }
 }
 
 // Thin C++ wrapper that launches the kernel on the current stream
 template <typename T>
-std::tuple<T, at::Tensor>
+std::tuple<T, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+           at::Tensor>
 epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
                   const at::Tensor &t1, const at::Tensor &t2,
                   const at::Tensor &f1Inv, const at::Tensor &f2Inv,
@@ -360,13 +468,20 @@ epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
   TORCH_CHECK(R1.is_cuda() && R2.is_cuda() && t1.is_cuda() && t2.is_cuda() &&
                   W.is_cuda(),
               "Tensors must be on CUDA");
-  auto out = at::empty_like(R1);
   int numImagePairs = R1.size(0);
 
   constexpr int numThreadsPerBlock = BATCH_SIZE * 3 * 3;
   const int numBlocks = 1024;
 
-  // Allocae buffers on HBM
+  // Initialize output tensor
+  auto dR1 = at::empty_like(R1);
+  auto dR2 = at::empty_like(R2);
+  auto dt1 = at::empty_like(t1);
+  auto dt2 = at::empty_like(t2);
+  auto dF1Inv = at::empty_like(f1Inv);
+  auto dF2Inv = at::empty_like(f2Inv);
+
+  // Allocae temporary buffers on HBM
   T *RrelGlobalPtr;        // Global pointer for R_rel
   T *t1xGlobalPtr;         // Global pointer for [t1]_x
   T *t2xGlobalPtr;         // Global pointer for [t2]_x
@@ -390,7 +505,9 @@ epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
           t2.data_ptr<T>(), f1Inv.data_ptr<T>(), f2Inv.data_ptr<T>(),
           W.data_ptr<T>(), RrelGlobalPtr, t1xGlobalPtr, t2xGlobalPtr,
           essentialGlobalPtr, FundamentalGlobalPtr, lossGlobalPtr,
-          out.data_ptr<T>(), numImagePairs);
+          dR1.data_ptr<T>(), dR2.data_ptr<T>(), dt1.data_ptr<T>(),
+          dt2.data_ptr<T>(), dF1Inv.data_ptr<T>(), dF2Inv.data_ptr<T>(),
+          numImagePairs);
 
   // Synchronize to ensure kernel execution is complete
   cudaError_t err = cudaGetLastError();
@@ -411,11 +528,12 @@ epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
   cudaFree(essentialGlobalPtr);
   cudaFree(FundamentalGlobalPtr);
 
-  return {loss, out};
+  return {loss, dR1, dR2, dt1, dt2, dF1Inv, dF2Inv};
 }
 
 // Explicit instantiation
-template std::tuple<float, at::Tensor>
+template std::tuple<float, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+                    at::Tensor, at::Tensor>
 epipolar_gradient<float>(const at::Tensor &R1, const at::Tensor &R2,
                          const at::Tensor &t1, const at::Tensor &t2,
                          const at::Tensor &f1Inv, const at::Tensor &f2Inv,

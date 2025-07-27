@@ -391,28 +391,6 @@ class CUDAComputeGradientModule(nn.Module):
         ) / F_norm  # (B,9)
         d_F = d_F_flat.view(-1, 3, 3)  # (B,3,3)
 
-        # debug: here
-        loss, d_F = epipolar_gradient(
-            R1=R1, R2=R2, t1=t1, t2=t2, f1_inv=f1_inv, f2_inv=f2_inv, W=W
-        )  # (B,3,3)
-        # # print(d_F.view(-1)[: len(F_norm)])
-        # # print(F_norm.view(-1))
-        # # print(torch.max(torch.abs(F_norm.view(-1) - d_F.view(-1)[: len(F_norm)])))
-        # # quit()
-        # print(d_F)
-        # print(d_F_gt)
-        # print(torch.max(torch.abs(d_F - d_F_gt)))
-        # quit()
-        # # print(F_norm)
-        # # print(d_F.view(-1)[: len(F_norm)])
-        # # print(
-        # #     torch.max(torch.abs(F_norm - d_F.view(-1)[: len(F_norm)]))
-        # # )  # should be very small
-        # print(d_F)
-        # print(d_F_gt)
-        # print(torch.max(torch.abs(d_F - d_F_gt)))
-        # quit()
-
         # -------------------------------------------------------------- #
         # ⇢ Layer-3
         # -------------------------------------------------------------- #
@@ -425,6 +403,11 @@ class CUDAComputeGradientModule(nn.Module):
 
             d_f1_inv = d_K1_inv[:, :, :2].sum((-1, -2))  # (B,)
             d_f2_inv = d_K2_inv[:, :2, :].sum((-1, -2))  # (B,)
+
+        # debug: here
+        loss, _, _, _, _, d_f1_inv, d_f2_inv = epipolar_gradient(
+            R1=R1, R2=R2, t1=t1, t2=t2, f1_inv=f1_inv, f2_inv=f2_inv, W=W
+        )  # (B,3,3)
 
         # -------------------------------------------------------------- #
         # ⇢ Layer-2

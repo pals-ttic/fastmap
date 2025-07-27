@@ -5,7 +5,8 @@
 #include <tuple>
 
 template <typename T>
-std::tuple<T, at::Tensor>
+std::tuple<T, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+           at::Tensor>
 epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
                   const at::Tensor &t1, const at::Tensor &t2,
                   const at::Tensor &f1Inv, const at::Tensor &f2Inv,
