@@ -32,6 +32,14 @@
 #define LAYER4_LOSS                                                            \
   sharedBuffer3x3c[0][0][0] // the first element of this buffer will
                             // contain the loss value
+// --- Layer 5 ---
+#define LAYER5_FUNDAMENTAL sharedBuffer3x3b
+#define LAYER5_d_FUNDAMENTAL sharedBuffer3x3a
+#define LAYER5_FUNDAMENTAL_NORM                                                \
+  sharedBuffer1x1a // re-used from Layer 3 for fundamental norm
+#define LAYER5_TEMP                                                            \
+  sharedBuffer1x1b // temporary buffer to store the dot product of F and d_F
+#define LAYER5_d_UNNORMALIZED_FUNDAMENTAL sharedBuffer3x3c
 
 constexpr int WARP_SIZE = 32;
 constexpr int BATCH_SIZE = 8; // Adjust as needed
@@ -250,26 +258,22 @@ __global__ void epipolarKernel(
           }
         }
         LAYER3_FUNDAMENTAL_NORM[pairIdxInBatch] =
-            sqrt(LAYER3_FUNDAMENTAL_NORM[pairIdxInBatch]);
+            sqrt(LAYER3_FUNDAMENTAL_NORM[pairIdxInBatch]) + 1e-8;
       }
     }
     __syncthreads();
     // Normalize the fundamental matrix
     if (threadIdxInBlock < minNumThreadsInBlock) {
-      if (LAYER3_FUNDAMENTAL_NORM[pairIdxInBatch] > 0) {
-        LAYER3_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] /=
-            LAYER3_FUNDAMENTAL_NORM[pairIdxInBatch];
-      } else {
-        LAYER3_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] = 0;
-      }
+      LAYER3_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch][colIdxInBatch] /=
+          LAYER3_FUNDAMENTAL_NORM[pairIdxInBatch];
     }
     __syncthreads();
     // Copy fundamental matrix to global memory
-    copyContiguousMemory(reinterpret_cast<const char *>(LAYER3_FUNDAMENTAL),
-                         reinterpret_cast<char *>(FundamentalGlobalPtr) +
-                             startImagePairIdx * 9 * sizeof(T),
-                         numImagePairsInBatch * sizeof(T) * 9);
-    __syncthreads();
+    // copyContiguousMemory(reinterpret_cast<const char *>(LAYER3_FUNDAMENTAL),
+    //                      reinterpret_cast<char *>(FundamentalGlobalPtr) +
+    //                          startImagePairIdx * 9 * sizeof(T),
+    //                      numImagePairsInBatch * sizeof(T) * 9);
+    // __syncthreads();
 
     // -------- Layer 4: Compute loss --------
     // Compute W @ fundamental (which is d_fundamental)
@@ -304,11 +308,45 @@ __global__ void epipolarKernel(
     }
     __syncthreads();
 
-    // debug temp: copy fundamental to output
-    copyContiguousMemory(reinterpret_cast<const char *>(LAYER4_d_FUNDAMENTAL),
-                         reinterpret_cast<char *>(outputGlobalPtr) +
-                             startImagePairIdx * 9 * sizeof(T),
-                         numImagePairsInBatch * sizeof(T) * 9);
+    // -------- Layer 5: Compute d_unnormalized_fundamental --------
+    // Compute dot product of fundamental and d_fundamental
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      if (rowIdxInBatch == 0 && colIdxInBatch == 0) {
+        LAYER5_TEMP[pairIdxInBatch] = 0;
+        for (int i = 0; i < 3; i++) {
+          for (int j = 0; j < 3; j++) {
+            LAYER5_TEMP[pairIdxInBatch] +=
+                LAYER5_FUNDAMENTAL[pairIdxInBatch][i][j] *
+                LAYER5_d_FUNDAMENTAL[pairIdxInBatch][i][j];
+          }
+        }
+      }
+    }
+    __syncthreads();
+    // copyContiguousMemory( // debug temp: copy fundamental norm to output
+    //     reinterpret_cast<const char *>(LAYER5_FUNDAMENTAL_NORM),
+    //     reinterpret_cast<char *>(outputGlobalPtr) +
+    //         startImagePairIdx * sizeof(T) * 1,
+    //     numImagePairsInBatch * sizeof(T) * 1);
+    // __syncthreads(); // debug temp: copy fundamental norm to output
+    // continue;        // debug temp: continue to next iteration
+    // Compute gradient with respect to unnormalized fundamental matrix
+    if (threadIdxInBlock < minNumThreadsInBlock) {
+      LAYER5_d_UNNORMALIZED_FUNDAMENTAL
+          [pairIdxInBatch][rowIdxInBatch][colIdxInBatch] =
+              (LAYER5_d_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch]
+                                   [colIdxInBatch] -
+               LAYER5_TEMP[pairIdxInBatch] *
+                   LAYER5_FUNDAMENTAL[pairIdxInBatch][rowIdxInBatch]
+                                     [colIdxInBatch]) /
+              LAYER5_FUNDAMENTAL_NORM[pairIdxInBatch];
+    }
+    __syncthreads();
+    copyContiguousMemory(
+        reinterpret_cast<const char *>(LAYER5_d_UNNORMALIZED_FUNDAMENTAL),
+        reinterpret_cast<char *>(outputGlobalPtr) +
+            startImagePairIdx * 9 * sizeof(T),
+        numImagePairsInBatch * sizeof(T) * 9);
   }
 }
 

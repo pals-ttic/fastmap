@@ -378,12 +378,6 @@ class CUDAComputeGradientModule(nn.Module):
         W_vec = torch.einsum("bij,bj->bi", W, F_normalised)  # (B,9)
         loss = 0.5 * (F_normalised * W_vec).sum()  # scalar
 
-        # debug: here
-        loss, W_vec = epipolar_gradient(
-            R1=R1, R2=R2, t1=t1, t2=t2, f1_inv=f1_inv, f2_inv=f2_inv, W=W
-        )  # (B,3,3)
-        W_vec = W_vec.reshape(-1, 9)  # (B,9)
-
         # -------------------------------------------------------------- #
         # ⇢ Layer-5
         # -------------------------------------------------------------- #
@@ -392,11 +386,32 @@ class CUDAComputeGradientModule(nn.Module):
         # -------------------------------------------------------------- #
         # ⇢ Layer-4
         # -------------------------------------------------------------- #
-        with DebugTimer("-- d_F_flat"):
-            d_F_flat = (
-                d_vec - (F_normalised * d_vec).sum(dim=-1, keepdim=True) * F_normalised
-            ) / F_norm  # (B,9)
-            d_F = d_F_flat.view(-1, 3, 3)  # (B,3,3)
+        d_F_flat = (
+            d_vec - (F_normalised * d_vec).sum(dim=-1, keepdim=True) * F_normalised
+        ) / F_norm  # (B,9)
+        d_F = d_F_flat.view(-1, 3, 3)  # (B,3,3)
+
+        # debug: here
+        loss, d_F = epipolar_gradient(
+            R1=R1, R2=R2, t1=t1, t2=t2, f1_inv=f1_inv, f2_inv=f2_inv, W=W
+        )  # (B,3,3)
+        # # print(d_F.view(-1)[: len(F_norm)])
+        # # print(F_norm.view(-1))
+        # # print(torch.max(torch.abs(F_norm.view(-1) - d_F.view(-1)[: len(F_norm)])))
+        # # quit()
+        # print(d_F)
+        # print(d_F_gt)
+        # print(torch.max(torch.abs(d_F - d_F_gt)))
+        # quit()
+        # # print(F_norm)
+        # # print(d_F.view(-1)[: len(F_norm)])
+        # # print(
+        # #     torch.max(torch.abs(F_norm - d_F.view(-1)[: len(F_norm)]))
+        # # )  # should be very small
+        # print(d_F)
+        # print(d_F_gt)
+        # print(torch.max(torch.abs(d_F - d_F_gt)))
+        # quit()
 
         # -------------------------------------------------------------- #
         # ⇢ Layer-3
