@@ -279,24 +279,6 @@ def initialization(
     return R_w2c
 
 
-def compute_gradent(
-    R_w2c1: torch.Tensor,
-    R_w2c2: torch.Tensor,
-    R_rel: torch.Tensor,
-):
-    # compute loss
-    loss = compute_rotation_angle_error(
-        R1=R_rel @ R_w2c1,
-        R2=R_w2c2,
-        clamp_value=0.9999999,
-        use_degree=False,
-    ).mean()
-    d_R_w2c1, d_R_w2c2 = torch.autograd.grad(
-        outputs=loss, inputs=(R_w2c1, R_w2c2), retain_graph=False
-    )  # (B, 3, 3), (B, 3, 3)
-    return loss, d_R_w2c1, d_R_w2c2
-
-
 @torch.no_grad()
 def loop(
     R_w2c: torch.Tensor,
@@ -323,8 +305,6 @@ def loop(
     image_idx2 = image_pairs.image_idx2[image_pair_mask]  # (num_image_pairs,)
     del image_pairs, image_pair_mask
 
-    from fastmap.debug import DebugTimer  # jiahao debug
-
     ##### Finetune with gradient descent #####
     with torch.enable_grad():
         # initialize the parameters and optimizer
@@ -343,34 +323,26 @@ def loop(
 
         # loop for optimization
         for iter_idx in range(1000000):
-            with DebugTimer("get R_w2c1 and R_w2c2"):
-                # forward
-                R_w2c1 = rotation_6d_to_matrix(
-                    torch.index_select(input=params, dim=0, index=image_idx1)
-                )  # (num_trainable_image_pairs, 3, 3)
-                R_w2c2 = rotation_6d_to_matrix(
-                    torch.index_select(input=params, dim=0, index=image_idx2)
-                )  # (num_trainable_image_pairs, 3, 3)
+            # forward
+            R_w2c1 = rotation_6d_to_matrix(
+                torch.index_select(input=params, dim=0, index=image_idx1)
+            )  # (num_trainable_image_pairs, 3, 3)
+            R_w2c2 = rotation_6d_to_matrix(
+                torch.index_select(input=params, dim=0, index=image_idx2)
+            )  # (num_trainable_image_pairs, 3, 3)
 
-            with DebugTimer("compute gradient"):
-                # compute gradient
-                loss, d_R_w2c1, d_R_w2c2 = compute_gradent(
-                    R_w2c1=R_w2c1,
-                    R_w2c2=R_w2c2,
-                    R_rel=rotation,
-                )
+            # compute loss
+            loss = compute_rotation_angle_error(
+                R1=rotation @ R_w2c1,
+                R2=R_w2c2,
+                clamp_value=0.9999999,
+                use_degree=False,
+            ).mean()
 
-            with DebugTimer("backward to parameters"):
-                # backward to parameters
-                optimizer.zero_grad()
-                torch.autograd.backward(
-                    tensors=[R_w2c1, R_w2c2],
-                    grad_tensors=[d_R_w2c1, d_R_w2c2],
-                )
-
-            with DebugTimer("step"):
-                # gradient step
-                optimizer.step()
+            # gradient step
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
             # check convergence
             moving_loss, if_converged = convergence_manager.step(

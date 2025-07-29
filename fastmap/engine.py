@@ -192,10 +192,39 @@ def engine(
             matches=matches, error_thr=cfg.pose_decomposition.error_thr
         )
 
+    import copy
+
+    backup_images = copy.deepcopy(images)  # backup images for later use
+
     # estimate global w2c rotation
     with timer("Global Rotation Alignment"):
         R_w2c = global_rotation(
             images=images,
+            image_pairs=image_pairs,
+            max_inlier_thr=cfg.rotation.max_inlier_thr,
+            min_inlier_thr=cfg.rotation.min_inlier_thr,
+            min_inlier_increment_frac=cfg.rotation.min_inlier_increment_frac,
+            max_angle_thr=cfg.rotation.max_angle_thr,
+            min_angle_thr=cfg.rotation.min_angle_thr,
+            angle_step=cfg.rotation.angle_step,
+            lr=cfg.rotation.lr,
+            log_interval=cfg.rotation.log_interval,
+        )
+
+    # log debugging info for global rotation
+    if gt_model is not None:
+        log_pairwise_rotation_angle_error(
+            R_w2c_pred=R_w2c,
+            images=images,
+            gt_model=gt_model,
+        )
+
+    # estimate global w2c rotation
+    from fastmap.old_rotation import global_rotation as old_global_rotation
+
+    with timer("Old Global Rotation Alignment"):
+        R_w2c_old = old_global_rotation(
+            images=backup_images,
             image_pairs=image_pairs,
             max_inlier_thr=cfg.rotation.max_inlier_thr,
             min_inlier_thr=cfg.rotation.min_inlier_thr,
@@ -211,10 +240,15 @@ def engine(
     # log debugging info for global rotation
     if gt_model is not None:
         log_pairwise_rotation_angle_error(
-            R_w2c_pred=R_w2c,
+            R_w2c_pred=R_w2c_old,
             images=images,
             gt_model=gt_model,
         )
+
+    # log time
+    timer.end()
+    timer.log()
+    quit()
 
     # build tracks container and extract point pairs
     with timer("Build Tracks"):
