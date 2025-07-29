@@ -245,11 +245,6 @@ def engine(
             gt_model=gt_model,
         )
 
-    # log time
-    timer.end()
-    timer.log()
-    quit()
-
     # build tracks container and extract point pairs
     with timer("Build Tracks"):
         tracks: Tracks = build_tracks(
@@ -309,6 +304,29 @@ def engine(
         log_pairwise_translation_angle_error(
             R_w2c_pred=R_w2c, t_w2c_pred=t_w2c, images=images, gt_model=gt_model
         )
+
+    from fastmap.old_translation import global_translation as old_global_translation
+
+    # old translation alignment
+    with timer("Old Global Translation Alignment"):
+        t_w2c_old = old_global_translation(
+            R_w2c=R_w2c,
+            image_pairs=image_pairs,
+            image_mask=images.mask,
+            num_init=cfg.global_translation.num_init,
+            log_interval=cfg.global_translation.log_interval,
+        )  # (num_images, 3)
+
+    # log debugging info for global translation
+    if gt_model is not None:
+        log_pairwise_translation_angle_error(
+            R_w2c_pred=R_w2c, t_w2c_pred=t_w2c_old, images=images, gt_model=gt_model
+        )
+
+    # log time
+    timer.end()
+    timer.log()
+    quit()
 
     original_R_w2c = R_w2c.clone()
     original_t_w2c = t_w2c.clone()
