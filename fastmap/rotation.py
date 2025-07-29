@@ -170,7 +170,10 @@ def initialization(
         logger.info(
             f"Solving x column using SVD on dense matrix of shape {' x '.join(map(str, AT_A.shape))}..."
         )
-        xcol = torch.linalg.svd(AT_A.to_dense()).Vh[-1]  # (num_images * 3,)
+        # xcol = torch.linalg.svd(AT_A.to_dense()).Vh[-1]  # (num_images * 3,)
+        xcol = torch.linalg.eigh(AT_A.to_dense()).eigenvectors[
+            ..., 0
+        ]  # (num_images * 3,)
     except RuntimeError as e:
         if "out of memory" not in str(e).lower():
             raise e
@@ -237,7 +240,10 @@ def initialization(
         logger.info(
             f"Solving y column using SVD on dense matrix of shape {' x '.join(map(str, AT_A.shape))}..."
         )
-        ycol = torch.linalg.svd(AT_A.to_dense()).Vh[-1]  # (num_images * 3,)
+        # ycol = torch.linalg.svd(AT_A.to_dense()).Vh[-1]  # (num_images * 3,)
+        ycol = torch.linalg.eigh(AT_A.to_dense()).eigenvectors[
+            ..., 0
+        ]  # (num_images * 3,)
     except RuntimeError as e:
         if "out of memory" not in str(e).lower():
             raise e
