@@ -30,7 +30,7 @@ class TranslationParameters(nn.Module):
         return t_c2w
 
 
-def compute_gradients(
+def old_compute_gradients(
     o1: torch.Tensor,
     o2: torch.Tensor,
     o12_gt: torch.Tensor,
@@ -43,6 +43,27 @@ def compute_gradients(
     d_o1, d_o2 = torch.autograd.grad(
         outputs=loss, inputs=(o1, o2), retain_graph=False
     )  # (B, 3, 3), (B, 3, 3)
+    return loss, d_o1, d_o2
+
+
+def compute_gradients(
+    o1: torch.Tensor,
+    o2: torch.Tensor,
+    o12_gt: torch.Tensor,
+):
+    o12 = o2 - o1  # (num_init, num_image_pairs, 3)
+    o12_norm = o12.norm(dim=-1, keepdim=True)  # (num_init, num_image_pairs, 1)
+    o12_normalized = o12 / (o12_norm + 1e-12)  # (num_init, num_image_pairs, 3)
+    loss = F.l1_loss(o12_gt, o12_normalized, reduction="mean")
+    d_o12_normalized = torch.where(o12_normalized > o12_gt, 1.0, -1.0) / len(
+        o12_gt.flatten()
+    )  # (num_init, num_image_pairs, 3)
+    d_o12 = (
+        d_o12_normalized
+        - (o12_normalized * d_o12_normalized).sum(dim=-1, keepdim=True) * o12_normalized
+    ) / o12_norm
+    d_o1 = -d_o12  # (num_init, num_image_pairs, 3)
+    d_o2 = d_o12  # (num_init, num_image_pairs, 3)
     return loss, d_o1, d_o2
 
 
