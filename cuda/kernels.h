@@ -16,3 +16,8 @@ epipolar_gradient(const at::Tensor &R1, const at::Tensor &R2,
                   at::Tensor &bufferRrel, at::Tensor &buffert1x,
                   at::Tensor &buffert2x, at::Tensor &bufferEssential,
                   at::Tensor &bufferFundamental);
+
+template <typename T>
+void rotation_gradient(const at::Tensor &Rrel, const at::Tensor &Rw2c1,
+                       const at::Tensor &Rw2c2, at::Tensor &loss,
+                       at::Tensor &dRw2c1, at::Tensor &dRw2c2, T clampThr);

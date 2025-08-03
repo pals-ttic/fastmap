@@ -27,6 +27,7 @@ setup(
         CUDAExtension(
             name=f"{PACKAGE_NAME}.cuda",
             sources=[
+                str(SOURCE_DIR / "rotation.cu"),
                 str(SOURCE_DIR / "epipolar.cu"),
                 str(SOURCE_DIR / "interface.cc"),
             ],

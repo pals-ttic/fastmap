@@ -11,6 +11,7 @@ from fastmap.utils import (
     ConvergenceManager,
     find_connected_components,
 )
+from fastmap.cuda import rotation_gradient
 
 
 def compute_rotation_angle_error(R1, R2, clamp_value=1.0, use_degree=True):
@@ -387,7 +388,7 @@ def flat_compute_gradient(
     return loss, d_R_w2c1, d_R_w2c2
 
 
-def compute_gradent(
+def torch_compute_gradent(
     R_w2c1: torch.Tensor,
     R_w2c2: torch.Tensor,
     R_rel: torch.Tensor,
@@ -414,6 +415,70 @@ def compute_gradent(
         clamp_thr=clamp_value,
     )  # (B, 3, 3), (B, 3, 3)
     return loss, d_R_w2c1, d_R_w2c2
+
+
+class CUDAComputeGradientModule(nn.Module):
+    def __init__(self, clamp_thr: float = 0.9999999):
+        super().__init__()
+        self.clamp_thr = clamp_thr
+        self._initialized = False
+
+    @torch.no_grad()
+    def forward(
+        self,
+        R_rel: torch.Tensor,  # float (B, 3, 3)
+        R_w2c1: torch.Tensor,  # float (B, 3, 3)
+        R_w2c2: torch.Tensor,  # float (B, 3, 3)
+    ):
+        if not self._initialized:
+            # make sure everything is contiguous
+            assert R_rel.is_contiguous()
+            assert R_w2c1.is_contiguous()
+            assert R_w2c2.is_contiguous()
+
+            # get device and dtype
+            device = R_rel.device
+            dtype = R_rel.dtype
+
+            # initialize the output tensors
+            self.loss = torch.zeros((1,), device=device, dtype=dtype)  # scalar
+            self.d_R_w2c1 = torch.zeros_like(R_w2c1)  # (B,3,3)
+            self.d_R_w2c2 = torch.zeros_like(R_w2c2)  # (B,3,3)
+
+            # set flag
+            self._initialized = True
+
+        rotation_gradient(
+            R_rel=R_rel,
+            R_w2c1=R_w2c1,
+            R_w2c2=R_w2c2,
+            loss=self.loss,
+            d_R_w2c1=self.d_R_w2c1,
+            d_R_w2c2=self.d_R_w2c2,
+            clamp_thr=self.clamp_thr,
+        )
+
+        # jiahao debug
+        loss_gt, d_R_w2c1_gt, d_R_w2c2_gt = torch_compute_gradent(
+            R_w2c1=R_w2c1,
+            R_w2c2=R_w2c2,
+            R_rel=R_rel,
+        )
+        print(d_R_w2c1_gt)
+        print(self.d_R_w2c1)
+        print(loss_gt.item(), self.loss.item())
+        assert torch.allclose(
+            self.d_R_w2c1, d_R_w2c1_gt, atol=1e-5, rtol=1e-5
+        ), f"d_R_w2c1 mismatch, max diff: {torch.abs(self.d_R_w2c1 - d_R_w2c1_gt).max().item()}"
+        assert torch.allclose(
+            self.d_R_w2c2, d_R_w2c2_gt, atol=1e-5, rtol=1e-5
+        ), f"d_R_w2c2 mismatch, max diff: {torch.abs(self.d_R_w2c2 - d_R_w2c2_gt).max().item()}"
+
+        return (
+            self.loss,
+            self.d_R_w2c1,
+            self.d_R_w2c2,
+        )
 
 
 @torch.no_grad()
@@ -443,6 +508,8 @@ def loop(
     del image_pairs, image_pair_mask
 
     from fastmap.debug import DebugTimer  # jiahao debug
+
+    compute_gradent = CUDAComputeGradientModule()  # jiahao debug
 
     ##### Finetune with gradient descent #####
     with torch.enable_grad():

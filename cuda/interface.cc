@@ -13,4 +13,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("d_f2_inv"), py::arg("buffer_R_rel"), py::arg("buffer_t1_x"),
         py::arg("buffer_t2_x"), py::arg("buffer_essential"),
         py::arg("buffer_fundamental"), "Compute the epipolar gradient");
+  m.def("rotation_gradient", &rotation_gradient<float>, py::arg("R_rel"),
+        py::arg("R_w2c1"), py::arg("R_w2c2"), py::arg("loss"),
+        py::arg("d_R_w2c1"), py::arg("d_R_w2c2"), py::arg("clamp_thr"),
+        "Compute the rotation gradient");
 }
