@@ -125,7 +125,8 @@ rotationKernel(const T *__restrict__ RrelGlobalPtr,
     __syncthreads();
 
     // Compute and write loss
-    if (threadIdxInBlock < minNumThreadsInBlock && rowIdxInBatch == 0 &&
+    if (threadIdxInBlock < minNumThreadsInBlock &&
+        pairIdxInBatch < numImagePairsInBatch && rowIdxInBatch == 0 &&
         colIdxInBatch == 0) {
       atomicAdd(lossGlobalPtr, acos(COS_CLAMPED[pairIdxInBatch]) /
                                    static_cast<T>(numImagePairs));
