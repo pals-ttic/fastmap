@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from fastmap.container import ImagePairs
 from fastmap.utils import ConvergenceManager, geometric_median
+from fastmap.cuda import translation_gradient
 
 
 class TranslationParameters(nn.Module):
@@ -67,6 +68,52 @@ def compute_gradients(
     return loss, d_o1, d_o2
 
 
+class CUDAComputeGradientModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self._initialized = False
+
+    @torch.no_grad()
+    def forward(
+        self,
+        o1: torch.Tensor,  # float (B, 3)
+        o2: torch.Tensor,  # float (B, 3)
+        o12_gt: torch.Tensor,  # float (B, 3)
+    ):
+        if not self._initialized:
+            # make sure everything is contiguous
+            o1 = o1.contiguous()
+            o2 = o2.contiguous()
+            o12_gt = o12_gt.contiguous()
+
+            # get device and dtype
+            device = o1.device
+            dtype = o1.dtype
+
+            # initialize the output tensors
+            self.loss = torch.zeros((1,), device=device, dtype=dtype)  # scalar
+            self.d_o1 = torch.zeros_like(o1)  # (B, 3)
+            self.d_o2 = torch.zeros_like(o2)  # (B, 3)
+
+            # set flag
+            self._initialized = True
+
+        translation_gradient(
+            o1=o1,
+            o2=o2,
+            o12_gt=o12_gt,
+            loss=self.loss,
+            d_o1=self.d_o1,
+            d_o2=self.d_o2,
+        )
+
+        return (
+            self.loss,
+            self.d_o1,
+            self.d_o2,
+        )
+
+
 @torch.no_grad()
 def loop(
     t_w2c: torch.Tensor,
@@ -102,6 +149,8 @@ def loop(
     del R_c2w2
 
     from fastmap.debug import DebugTimer  # jiahao debug
+
+    compute_gradients = CUDAComputeGradientModule()  # jiahao debug
 
     # construct the parameters
     t_c2w = torch.einsum(

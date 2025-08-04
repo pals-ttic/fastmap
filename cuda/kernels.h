@@ -21,3 +21,8 @@ template <typename T>
 void rotation_gradient(const at::Tensor &Rrel, const at::Tensor &Rw2c1,
                        const at::Tensor &Rw2c2, at::Tensor &loss,
                        at::Tensor &dRw2c1, at::Tensor &dRw2c2, T clampThr);
+
+template <typename T>
+void translation_gradient(const at::Tensor &o1, const at::Tensor &o2,
+                          const at::Tensor &o12GT, at::Tensor &loss,
+                          at::Tensor &do1, at::Tensor &do2);

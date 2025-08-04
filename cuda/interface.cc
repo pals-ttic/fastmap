@@ -17,4 +17,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("R_w2c1"), py::arg("R_w2c2"), py::arg("loss"),
         py::arg("d_R_w2c1"), py::arg("d_R_w2c2"), py::arg("clamp_thr"),
         "Compute the rotation gradient");
+  m.def("translation_gradient", &translation_gradient<float>, py::arg("o1"),
+        py::arg("o2"), py::arg("o12_gt"), py::arg("loss"), py::arg("d_o1"),
+        py::arg("d_o2"), "Compute the translation gradient");
 }
+void translation_gradient(const at::Tensor &o1, const at::Tensor &o2,
+                          const at::Tensor &o12GT, at::Tensor &loss,
+                          at::Tensor &do1, at::Tensor &do2);
