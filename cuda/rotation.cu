@@ -136,10 +136,9 @@ rotationKernel(const T *__restrict__ RrelGlobalPtr,
     // Compute d_TRACE
     if (threadIdxInBlock < minNumThreadsInBlock && rowIdxInBatch == 0 &&
         colIdxInBatch == 0) {
-      d_TRACE[pairIdxInBatch] = -1.0 /
+      d_TRACE[pairIdxInBatch] = -(1.0 / static_cast<T>(numImagePairs)) /
                                 sqrt(1.0 - COS_CLAMPED[pairIdxInBatch] *
-                                               COS_CLAMPED[pairIdxInBatch]) /
-                                static_cast<T>(numImagePairs) *
+                                               COS_CLAMPED[pairIdxInBatch]) *
                                 CLAMP_MASK[pairIdxInBatch] * 0.5;
     }
     __syncthreads();

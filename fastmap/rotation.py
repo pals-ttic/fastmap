@@ -385,7 +385,7 @@ def flat_compute_gradient(
     d_R_w2c1 = R_rel.transpose(-1, -2) @ d_R1  # (B, 3, 3)
     d_R_w2c2 = d_R2  # (B, 3, 3)
 
-    return loss, d_R_w2c1, d_R_w2c2
+    return loss, d_R_w2c1, d_R_w2c2, d_trace
 
 
 def torch_compute_gradent(
@@ -459,20 +459,30 @@ class CUDAComputeGradientModule(nn.Module):
         )
 
         # jiahao debug
-        loss_gt, d_R_w2c1_gt, d_R_w2c2_gt = torch_compute_gradent(
-            R_w2c1=R_w2c1,
-            R_w2c2=R_w2c2,
-            R_rel=R_rel,
-        )
-        print(d_R_w2c1_gt)
-        print(self.d_R_w2c1)
-        print(loss_gt.item(), self.loss.item())
-        assert torch.allclose(
-            self.d_R_w2c1, d_R_w2c1_gt, atol=1e-5, rtol=1e-5
-        ), f"d_R_w2c1 mismatch, max diff: {torch.abs(self.d_R_w2c1 - d_R_w2c1_gt).max().item()}"
-        assert torch.allclose(
-            self.d_R_w2c2, d_R_w2c2_gt, atol=1e-5, rtol=1e-5
-        ), f"d_R_w2c2 mismatch, max diff: {torch.abs(self.d_R_w2c2 - d_R_w2c2_gt).max().item()}"
+        if False:
+            loss_gt, d_R_w2c1_gt, d_R_w2c2_gt, d_trace_gt = flat_compute_gradient(
+                R_w2c1=R_w2c1,
+                R_w2c2=R_w2c2,
+                R_rel=R_rel,
+            )
+            d_trace = self.d_R_w2c1.flatten()[: len(d_trace_gt)]
+            bad_mask = torch.abs(d_trace - d_trace_gt) > 1e-2
+            print(d_trace)
+            print(d_trace_gt)
+            print("bad")
+            print(d_trace[bad_mask])
+            print(d_trace_gt[bad_mask])
+            print("d_trace max diff:", torch.abs(d_trace - d_trace_gt).max().item())
+            quit()
+            print(d_R_w2c1_gt)
+            print(self.d_R_w2c1)
+            print(loss_gt.item(), self.loss.item())
+            assert torch.allclose(
+                self.d_R_w2c1, d_R_w2c1_gt, atol=1e-5, rtol=1e-5
+            ), f"d_R_w2c1 mismatch, max diff: {torch.abs(self.d_R_w2c1 - d_R_w2c1_gt).max().item()}"
+            assert torch.allclose(
+                self.d_R_w2c2, d_R_w2c2_gt, atol=1e-5, rtol=1e-5
+            ), f"d_R_w2c2 mismatch, max diff: {torch.abs(self.d_R_w2c2 - d_R_w2c2_gt).max().item()}"
 
         return (
             self.loss,
@@ -508,6 +518,8 @@ def loop(
     del image_pairs, image_pair_mask
 
     from fastmap.debug import DebugTimer  # jiahao debug
+
+    DebugTimer.disable()  # jiahao debug
 
     compute_gradent = CUDAComputeGradientModule()  # jiahao debug
 
