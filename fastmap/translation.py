@@ -65,7 +65,7 @@ def compute_gradients(
     ) / o12_norm
     d_o1 = -d_o12  # (num_init, num_image_pairs, 3)
     d_o2 = d_o12  # (num_init, num_image_pairs, 3)
-    return loss, d_o1, d_o2
+    return loss, d_o1, d_o2, o12_normalized, d_o12_normalized, d_o12
 
 
 class CUDAComputeGradientModule(nn.Module):
@@ -82,9 +82,9 @@ class CUDAComputeGradientModule(nn.Module):
     ):
         if not self._initialized:
             # make sure everything is contiguous
-            o1 = o1.contiguous()
-            o2 = o2.contiguous()
-            o12_gt = o12_gt.contiguous()
+            assert o1.is_contiguous()
+            assert o2.is_contiguous()
+            assert o12_gt.is_contiguous()
 
             # get device and dtype
             device = o1.device
@@ -106,6 +106,25 @@ class CUDAComputeGradientModule(nn.Module):
             d_o1=self.d_o1,
             d_o2=self.d_o2,
         )
+
+        # # jiahao debug
+        # (
+        #     loss_gt,
+        #     d_o1_gt,
+        #     d_o2_gt,
+        #     o12_normalized_gt,
+        #     d_o12_normalized_gt,
+        #     d_o12_gt,
+        # ) = compute_gradients(o1, o2, o12_gt)
+        # # # d_o12 = self.d_o1
+        # # print("---")
+        # # print(self.loss.item())
+        # print(loss_gt.item(), self.loss.item())
+        # # print(loss_gt.item(), self.loss.item())
+        # # print("---")
+        # print("loss max diff:", (self.loss - loss_gt).abs().max().item())
+        # print("d_o1 max diff:", (self.d_o1 - d_o1_gt).abs().max().item())
+        # print("d_o2 max diff:", (self.d_o2 - d_o2_gt).abs().max().item())
 
         return (
             self.loss,
@@ -145,7 +164,7 @@ def loop(
     # compute the gt target
     R_c2w2 = R_w2c[image_idx2].transpose(-1, -2)  # (num_image_pairs, 3, 3)
     o12_gt = torch.einsum("bij,bj->bi", R_c2w2, -translation)  # (num_image_pairs, 3)
-    o12_gt = o12_gt.expand(num_init, -1, -1)  # (num_init, num_image_pairs, 3)
+    o12_gt = o12_gt.expand(num_init, -1, -1).clone()  # (num_init, num_image_pairs, 3)
     del R_c2w2
 
     from fastmap.debug import DebugTimer  # jiahao debug

@@ -35,7 +35,7 @@ translationKernel(const T *__restrict__ o1GlobalPtr,
                   const T *__restrict__ o2GlobalPtr,
                   const T *__restrict__ o12GTGlobalPtr,
                   T *__restrict__ lossGlobalPtr, T *__restrict__ do1GlobalPtr,
-                  T *__restrict__ do2GlobalPtr, T clampThr, int numImagePairs) {
+                  T *__restrict__ do2GlobalPtr, int numImagePairs) {
 
   const int threadIdxInBlock = threadIdx.x;
   const int numThreadsInBlock = blockDim.x;
@@ -131,7 +131,7 @@ translationKernel(const T *__restrict__ o1GlobalPtr,
     // Compute d_o12_normalized
     if (threadIdxInBlock < minNumThreadsInBlock) {
       d_O12_NORMALIZED[pairIdxInBatch][colIdxInBatch] =
-          O12_NORMALIZED[pairIdxInBatch][colIdxInBatch] -
+          O12_NORMALIZED[pairIdxInBatch][colIdxInBatch] >
                   O12_GT[pairIdxInBatch][colIdxInBatch]
               ? 1.0
               : -1.0;
@@ -183,9 +183,11 @@ void translation_gradient(const at::Tensor &o1, const at::Tensor &o2,
   TORCH_CHECK(o1.is_cuda() && o2.is_cuda() && o12GT.is_cuda() &&
                   loss.is_cuda() && do1.is_cuda() && do2.is_cuda(),
               "All tensors must be on CUDA");
-  int numImagePairs = o1.size(0);
+  int numImagePairs =
+      o1.size(0) *
+      o1.size(1); // Note that o1 has size (num_init, num_image_pairs, 3)
 
-  constexpr int numThreadsPerBlock = BATCH_SIZE * 3 * 3;
+  constexpr int numThreadsPerBlock = BATCH_SIZE * 3;
   const int numBlocks = 1024;
 
   // Set loss tensor to zero
@@ -196,7 +198,7 @@ void translation_gradient(const at::Tensor &o1, const at::Tensor &o2,
       <<<numBlocks, numThreadsPerBlock, 0, at::cuda::getCurrentCUDAStream()>>>(
           o1.data_ptr<T>(), o2.data_ptr<T>(), o12GT.data_ptr<T>(),
           loss.data_ptr<T>(), do1.data_ptr<T>(), do2.data_ptr<T>(),
-          static_cast<T>(0.0f), numImagePairs);
+          numImagePairs);
 
   // Synchronize to ensure kernel execution is complete
   cudaError_t err = cudaGetLastError();

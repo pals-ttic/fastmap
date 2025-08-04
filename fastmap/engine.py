@@ -323,11 +323,6 @@ def engine(
             R_w2c_pred=R_w2c, t_w2c_pred=t_w2c_old, images=images, gt_model=gt_model
         )
 
-    # log time
-    timer.end()
-    timer.log()
-    quit()
-
     original_R_w2c = R_w2c.clone()
     original_t_w2c = t_w2c.clone()
     original_point_pair_mask = point_pair_mask.clone()
