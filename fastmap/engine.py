@@ -219,31 +219,31 @@ def engine(
             gt_model=gt_model,
         )
 
-    # estimate global w2c rotation
-    from fastmap.old_rotation import global_rotation as old_global_rotation
-
-    with timer("Old Global Rotation Alignment"):
-        R_w2c_old = old_global_rotation(
-            images=backup_images,
-            image_pairs=image_pairs,
-            max_inlier_thr=cfg.rotation.max_inlier_thr,
-            min_inlier_thr=cfg.rotation.min_inlier_thr,
-            min_inlier_increment_frac=cfg.rotation.min_inlier_increment_frac,
-            max_angle_thr=cfg.rotation.max_angle_thr,
-            min_angle_thr=cfg.rotation.min_angle_thr,
-            angle_step=cfg.rotation.angle_step,
-            lr=cfg.rotation.lr,
-            log_interval=cfg.rotation.log_interval,
-        )
-    del image_pairs  # prevent misuse
-
-    # log debugging info for global rotation
-    if gt_model is not None:
-        log_pairwise_rotation_angle_error(
-            R_w2c_pred=R_w2c_old,
-            images=images,
-            gt_model=gt_model,
-        )
+    # # estimate global w2c rotation
+    # from fastmap.old_rotation import global_rotation as old_global_rotation
+    #
+    # with timer("Old Global Rotation Alignment"):
+    #     R_w2c_old = old_global_rotation(
+    #         images=backup_images,
+    #         image_pairs=image_pairs,
+    #         max_inlier_thr=cfg.rotation.max_inlier_thr,
+    #         min_inlier_thr=cfg.rotation.min_inlier_thr,
+    #         min_inlier_increment_frac=cfg.rotation.min_inlier_increment_frac,
+    #         max_angle_thr=cfg.rotation.max_angle_thr,
+    #         min_angle_thr=cfg.rotation.min_angle_thr,
+    #         angle_step=cfg.rotation.angle_step,
+    #         lr=cfg.rotation.lr,
+    #         log_interval=cfg.rotation.log_interval,
+    #     )
+    # del image_pairs  # prevent misuse
+    #
+    # # log debugging info for global rotation
+    # if gt_model is not None:
+    #     log_pairwise_rotation_angle_error(
+    #         R_w2c_pred=R_w2c_old,
+    #         images=images,
+    #         gt_model=gt_model,
+    #     )
 
     # build tracks container and extract point pairs
     with timer("Build Tracks"):
@@ -305,35 +305,35 @@ def engine(
             R_w2c_pred=R_w2c, t_w2c_pred=t_w2c, images=images, gt_model=gt_model
         )
 
-    from fastmap.old_translation import global_translation as old_global_translation
-
-    # old translation alignment
-    with timer("Old Global Translation Alignment"):
-        t_w2c_old = old_global_translation(
-            R_w2c=R_w2c,
-            image_pairs=image_pairs,
-            image_mask=images.mask,
-            num_init=cfg.global_translation.num_init,
-            log_interval=cfg.global_translation.log_interval,
-        )  # (num_images, 3)
-
-    # log debugging info for global translation
-    if gt_model is not None:
-        log_pairwise_translation_angle_error(
-            R_w2c_pred=R_w2c, t_w2c_pred=t_w2c_old, images=images, gt_model=gt_model
-        )
-
-    original_R_w2c = R_w2c.clone()
-    original_t_w2c = t_w2c.clone()
-    original_point_pair_mask = point_pair_mask.clone()
+    # from fastmap.old_translation import global_translation as old_global_translation
+    #
+    # # old translation alignment
+    # with timer("Old Global Translation Alignment"):
+    #     t_w2c_old = old_global_translation(
+    #         R_w2c=R_w2c,
+    #         image_pairs=image_pairs,
+    #         image_mask=images.mask,
+    #         num_init=cfg.global_translation.num_init,
+    #         log_interval=cfg.global_translation.log_interval,
+    #     )  # (num_images, 3)
+    #
+    # # log debugging info for global translation
+    # if gt_model is not None:
+    #     log_pairwise_translation_angle_error(
+    #         R_w2c_pred=R_w2c, t_w2c_pred=t_w2c_old, images=images, gt_model=gt_model
+    #     )
+    #
+    # original_R_w2c = R_w2c.clone()
+    # original_t_w2c = t_w2c.clone()
+    # original_point_pair_mask = point_pair_mask.clone()
 
     # global epipolar optimization
-    with timer("New Global Epipolar Optimization"):
+    with timer("Global Epipolar Optimization"):
         R_w2c, t_w2c, focal_scale, point_pair_mask = epipolar_adjustment(
-            R_w2c=original_R_w2c,
-            t_w2c=original_t_w2c,
+            R_w2c=R_w2c,
+            t_w2c=t_w2c,
             point_pairs=point_pairs,
-            point_pair_mask=original_point_pair_mask,
+            point_pair_mask=point_pair_mask,
             images=images,
             cameras=cameras,
             num_irls_steps=cfg.epipolar_adjustment.num_irls_steps,
@@ -354,34 +354,34 @@ def engine(
             gt_model=gt_model,
         )
 
-    # global epipolar optimization
-    from fastmap.old_epipolar import epipolar_adjustment as old_epipolar_adjustment
-
-    with timer("Old Global Epipolar Optimization"):
-        R_w2c, t_w2c, focal_scale, point_pair_mask = old_epipolar_adjustment(
-            R_w2c=original_R_w2c,
-            t_w2c=original_t_w2c,
-            point_pairs=point_pairs,
-            point_pair_mask=original_point_pair_mask,
-            images=images,
-            cameras=cameras,
-            num_irls_steps=cfg.epipolar_adjustment.num_irls_steps,
-            num_prune_steps=cfg.epipolar_adjustment.num_prune_steps,
-            max_thr=cfg.epipolar_adjustment.max_thr,
-            min_thr=cfg.epipolar_adjustment.min_thr,
-            lr=cfg.epipolar_adjustment.lr,
-            lr_decay=cfg.epipolar_adjustment.lr_decay,
-            log_interval=cfg.epipolar_adjustment.log_interval,
-        )  # (num_images, 3), (num_images, 3), (num_cameras,), (num_point_pairs,)
-
-    # log debugging info for final poses
-    if gt_model is not None:
-        log_pairwise_angle_error(
-            R_w2c_pred=R_w2c,
-            t_w2c_pred=t_w2c,
-            images=images,
-            gt_model=gt_model,
-        )
+    # # global epipolar optimization
+    # from fastmap.old_epipolar import epipolar_adjustment as old_epipolar_adjustment
+    #
+    # with timer("Old Global Epipolar Optimization"):
+    #     R_w2c, t_w2c, focal_scale, point_pair_mask = old_epipolar_adjustment(
+    #         R_w2c=original_R_w2c,
+    #         t_w2c=original_t_w2c,
+    #         point_pairs=point_pairs,
+    #         point_pair_mask=original_point_pair_mask,
+    #         images=images,
+    #         cameras=cameras,
+    #         num_irls_steps=cfg.epipolar_adjustment.num_irls_steps,
+    #         num_prune_steps=cfg.epipolar_adjustment.num_prune_steps,
+    #         max_thr=cfg.epipolar_adjustment.max_thr,
+    #         min_thr=cfg.epipolar_adjustment.min_thr,
+    #         lr=cfg.epipolar_adjustment.lr,
+    #         lr_decay=cfg.epipolar_adjustment.lr_decay,
+    #         log_interval=cfg.epipolar_adjustment.log_interval,
+    #     )  # (num_images, 3), (num_images, 3), (num_cameras,), (num_point_pairs,)
+    #
+    # # log debugging info for final poses
+    # if gt_model is not None:
+    #     log_pairwise_angle_error(
+    #         R_w2c_pred=R_w2c,
+    #         t_w2c_pred=t_w2c,
+    #         images=images,
+    #         gt_model=gt_model,
+    #     )
 
     # update cameras with focal scale
     cameras.focal *= focal_scale

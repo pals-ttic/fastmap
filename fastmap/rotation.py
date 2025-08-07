@@ -458,32 +458,6 @@ class CUDAComputeGradientModule(nn.Module):
             clamp_thr=self.clamp_thr,
         )
 
-        # jiahao debug
-        if False:
-            loss_gt, d_R_w2c1_gt, d_R_w2c2_gt, d_trace_gt = flat_compute_gradient(
-                R_w2c1=R_w2c1,
-                R_w2c2=R_w2c2,
-                R_rel=R_rel,
-            )
-            d_trace = self.d_R_w2c1.flatten()[: len(d_trace_gt)]
-            bad_mask = torch.abs(d_trace - d_trace_gt) > 1e-2
-            print(d_trace)
-            print(d_trace_gt)
-            print("bad")
-            print(d_trace[bad_mask])
-            print(d_trace_gt[bad_mask])
-            print("d_trace max diff:", torch.abs(d_trace - d_trace_gt).max().item())
-            quit()
-            print(d_R_w2c1_gt)
-            print(self.d_R_w2c1)
-            print(loss_gt.item(), self.loss.item())
-            assert torch.allclose(
-                self.d_R_w2c1, d_R_w2c1_gt, atol=1e-5, rtol=1e-5
-            ), f"d_R_w2c1 mismatch, max diff: {torch.abs(self.d_R_w2c1 - d_R_w2c1_gt).max().item()}"
-            assert torch.allclose(
-                self.d_R_w2c2, d_R_w2c2_gt, atol=1e-5, rtol=1e-5
-            ), f"d_R_w2c2 mismatch, max diff: {torch.abs(self.d_R_w2c2 - d_R_w2c2_gt).max().item()}"
-
         return (
             self.loss,
             self.d_R_w2c1,
@@ -517,10 +491,6 @@ def loop(
     image_idx2 = image_pairs.image_idx2[image_pair_mask]  # (num_image_pairs,)
     del image_pairs, image_pair_mask
 
-    from fastmap.debug import DebugTimer  # jiahao debug
-
-    DebugTimer.disable()  # jiahao debug
-
     compute_gradent = CUDAComputeGradientModule()  # jiahao debug
 
     ##### Finetune with gradient descent #####
@@ -541,34 +511,30 @@ def loop(
 
         # loop for optimization
         for iter_idx in range(1000000):
-            with DebugTimer("get R_w2c1 and R_w2c2"):
-                # forward
-                R_w2c1 = rotation_6d_to_matrix(
-                    torch.index_select(input=params, dim=0, index=image_idx1)
-                )  # (num_trainable_image_pairs, 3, 3)
-                R_w2c2 = rotation_6d_to_matrix(
-                    torch.index_select(input=params, dim=0, index=image_idx2)
-                )  # (num_trainable_image_pairs, 3, 3)
+            # forward
+            R_w2c1 = rotation_6d_to_matrix(
+                torch.index_select(input=params, dim=0, index=image_idx1)
+            )  # (num_trainable_image_pairs, 3, 3)
+            R_w2c2 = rotation_6d_to_matrix(
+                torch.index_select(input=params, dim=0, index=image_idx2)
+            )  # (num_trainable_image_pairs, 3, 3)
 
-            with DebugTimer("compute gradient"):
-                # compute gradient
-                loss, d_R_w2c1, d_R_w2c2 = compute_gradent(
-                    R_w2c1=R_w2c1,
-                    R_w2c2=R_w2c2,
-                    R_rel=rotation,
-                )
+            # compute gradient
+            loss, d_R_w2c1, d_R_w2c2 = compute_gradent(
+                R_w2c1=R_w2c1,
+                R_w2c2=R_w2c2,
+                R_rel=rotation,
+            )
 
-            with DebugTimer("backward to parameters"):
-                # backward to parameters
-                optimizer.zero_grad()
-                torch.autograd.backward(
-                    tensors=[R_w2c1, R_w2c2],
-                    grad_tensors=[d_R_w2c1, d_R_w2c2],
-                )
+            # backward to parameters
+            optimizer.zero_grad()
+            torch.autograd.backward(
+                tensors=[R_w2c1, R_w2c2],
+                grad_tensors=[d_R_w2c1, d_R_w2c2],
+            )
 
-            with DebugTimer("step"):
-                # gradient step
-                optimizer.step()
+            # gradient step
+            optimizer.step()
 
             # check convergence
             moving_loss, if_converged = convergence_manager.step(

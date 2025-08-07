@@ -107,25 +107,6 @@ class CUDAComputeGradientModule(nn.Module):
             d_o2=self.d_o2,
         )
 
-        # # jiahao debug
-        # (
-        #     loss_gt,
-        #     d_o1_gt,
-        #     d_o2_gt,
-        #     o12_normalized_gt,
-        #     d_o12_normalized_gt,
-        #     d_o12_gt,
-        # ) = compute_gradients(o1, o2, o12_gt)
-        # # # d_o12 = self.d_o1
-        # # print("---")
-        # # print(self.loss.item())
-        # print(loss_gt.item(), self.loss.item())
-        # # print(loss_gt.item(), self.loss.item())
-        # # print("---")
-        # print("loss max diff:", (self.loss - loss_gt).abs().max().item())
-        # print("d_o1 max diff:", (self.d_o1 - d_o1_gt).abs().max().item())
-        # print("d_o2 max diff:", (self.d_o2 - d_o2_gt).abs().max().item())
-
         return (
             self.loss,
             self.d_o1,
@@ -167,8 +148,6 @@ def loop(
     o12_gt = o12_gt.expand(num_init, -1, -1).clone()  # (num_init, num_image_pairs, 3)
     del R_c2w2
 
-    from fastmap.debug import DebugTimer  # jiahao debug
-
     compute_gradients = CUDAComputeGradientModule()  # jiahao debug
 
     # construct the parameters
@@ -191,43 +170,38 @@ def loop(
     with torch.enable_grad():
         # loop for optimization
         for iter_idx in range(1000000):
-            with DebugTimer("params forward"):
-                # forward
-                t_c2w = params()  # (num_init, num_images, 3)
-                o1 = torch.index_select(
-                    input=t_c2w, dim=1, index=image_idx1
-                )  # (num_init, num_image_pairs, 3)
-                o2 = torch.index_select(
-                    input=t_c2w, dim=1, index=image_idx2
-                )  # (num_init, num_image_pairs, 3)
+            # forward
+            t_c2w = params()  # (num_init, num_images, 3)
+            o1 = torch.index_select(
+                input=t_c2w, dim=1, index=image_idx1
+            )  # (num_init, num_image_pairs, 3)
+            o2 = torch.index_select(
+                input=t_c2w, dim=1, index=image_idx2
+            )  # (num_init, num_image_pairs, 3)
 
-            with DebugTimer("compute gradients"):
-                # compute gradients
-                loss, d_o1, d_o2 = compute_gradients(o1=o1, o2=o2, o12_gt=o12_gt)
+            # compute gradients
+            loss, d_o1, d_o2 = compute_gradients(o1=o1, o2=o2, o12_gt=o12_gt)
 
-            with DebugTimer("backward to parameters"):
-                # backward to parameters
-                optimizer.zero_grad()
-                torch.autograd.backward(
-                    tensors=[o1, o2],
-                    grad_tensors=[d_o1, d_o2],
-                    retain_graph=False,
+            # backward to parameters
+            optimizer.zero_grad()
+            torch.autograd.backward(
+                tensors=[o1, o2],
+                grad_tensors=[d_o1, d_o2],
+                retain_graph=False,
+            )
+
+            # gradient step
+            optimizer.step()
+
+            # check convergence
+            moving_loss, if_converged = convergence_manager.step(
+                step=iter_idx, loss=loss
+            )
+            if if_converged:
+                logger.info(
+                    f"Converged at iter {iter_idx} with moving loss {moving_loss:.6f}"
                 )
-
-            with DebugTimer("optimizer step"):
-                # gradient step
-                optimizer.step()
-
-            with DebugTimer("convergence manager step"):
-                # check convergence
-                moving_loss, if_converged = convergence_manager.step(
-                    step=iter_idx, loss=loss
-                )
-                if if_converged:
-                    logger.info(
-                        f"Converged at iter {iter_idx} with moving loss {moving_loss:.6f}"
-                    )
-                    break
+                break
 
             if iter_idx % log_interval == 0:
                 logger.info(
