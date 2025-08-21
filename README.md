@@ -91,10 +91,6 @@ If FastMap fails on a database but other methods such as COLMAP succeed, you can
 ## Data and Reproduction
 Images, pre-computed databases and ground truths to reproduce our benchmarks are hosted [here](https://huggingface.co/datasets/whc/fastmap_sfm). Download a subset to start playing with FastMap. 
 
-GLOMAP/COLMAP container:
-- the singularity container `.sif` is in the data repo.
-- the docker container and Dockerfile are [here](https://hub.docker.com/r/haochenw/glomap/tags)
-
 ## Limitations
 This method works best on datasets with high quality images intended for dense 3D reconstruction (e.g. as a proprocessing step before NeRF). It trade robustness for simplicity and speed, so is not particularly careful in countering the negative effect of outlier matches. In cases like sparse scene coverage, low quality matching, degenerate motions (e.g. colinear translation), it is less robust than COLMAP and GLOMAP, and is prone to catastrophic failures.
 
