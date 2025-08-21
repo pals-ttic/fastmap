@@ -24,7 +24,7 @@ def compute_rotation_angle_error(R1, R2, clamp_value=1.0, use_degree=True):
         angle: torch.Tensor, float, shape=(...), rotation angle error
     """
     # Compute the relative rotation matrix
-    R = R1.transpose(-1, -2) @ R2
+    R = R1.transpose(-1, -2).contiguous() @ R2
 
     # Compute the trace of the relative rotation matrix
     trace = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]
@@ -170,7 +170,10 @@ def initialization(
         logger.info(
             f"Solving x column using SVD on dense matrix of shape {' x '.join(map(str, AT_A.shape))}..."
         )
-        xcol = torch.linalg.svd(AT_A.to_dense()).Vh[-1]  # (num_images * 3,)
+        # xcol = torch.linalg.svd(AT_A.to_dense()).Vh[-1]  # (num_images * 3,)
+        xcol = torch.linalg.eigh(AT_A.to_dense()).eigenvectors[
+            ..., 0
+        ]  # (num_images * 3,)
     except RuntimeError as e:
         if "out of memory" not in str(e).lower():
             raise e
@@ -237,7 +240,10 @@ def initialization(
         logger.info(
             f"Solving y column using SVD on dense matrix of shape {' x '.join(map(str, AT_A.shape))}..."
         )
-        ycol = torch.linalg.svd(AT_A.to_dense()).Vh[-1]  # (num_images * 3,)
+        # ycol = torch.linalg.svd(AT_A.to_dense()).Vh[-1]  # (num_images * 3,)
+        ycol = torch.linalg.eigh(AT_A.to_dense()).eigenvectors[
+            ..., 0
+        ]  # (num_images * 3,)
     except RuntimeError as e:
         if "out of memory" not in str(e).lower():
             raise e
@@ -273,6 +279,103 @@ def initialization(
     return R_w2c
 
 
+class TorchComputeGradientModule(nn.Module):
+    def __init__(self, clamp_thr: float = 0.9999999):
+        super().__init__()
+        self.clamp_thr = clamp_thr
+
+    @torch.no_grad()
+    def forward(
+        self,
+        R_rel: torch.Tensor,  # float (B, 3, 3)
+        R_w2c1: torch.Tensor,  # float (B, 3, 3)
+        R_w2c2: torch.Tensor,  # float (B, 3, 3)
+    ):
+        clamp_thr = self.clamp_thr
+        R1 = R_rel @ R_w2c1  # (B, 3, 3)
+        R2 = R_w2c2  # (B, 3, 3)
+        # Frobenius inner product: tr(R1^T R2) = sum_ij R1_ij * R2_ij
+        trace = (R1 * R2).sum(dim=(-1, -2))  # shape (...,)
+        cos_value = (trace - 1.0) * 0.5  # shape (...,)
+        clamp_mask = (cos_value > -clamp_thr) & (cos_value < clamp_thr)
+        cos_value_clamped = cos_value.clamp(
+            min=-clamp_thr, max=clamp_thr
+        )  # detach-free clamp
+        angle = torch.acos(cos_value_clamped)  # radians
+        loss = angle.mean()  # shape ()
+
+        d_angle = torch.ones((len(R1),), device=R1.device, dtype=R1.dtype) / len(R1)
+
+        d_cos_value_clamped = -d_angle / torch.sqrt(
+            1.0 - cos_value_clamped * cos_value_clamped
+        )
+
+        d_cos_value = d_cos_value_clamped * clamp_mask.to(
+            d_cos_value_clamped
+        )  # shape (...,)
+
+        d_trace = d_cos_value * 0.5  # shape (...,)
+
+        d_R1 = d_trace[..., None, None] * R2  # shape (..., 3, 3)
+        d_R2 = d_trace[..., None, None] * R1  # shape (..., 3, 3)
+
+        d_R_w2c1 = R_rel.transpose(-1, -2) @ d_R1  # (B, 3, 3)
+        d_R_w2c2 = d_R2  # (B, 3, 3)
+
+        return loss, d_R_w2c1, d_R_w2c2
+
+
+class CUDAComputeGradientModule(nn.Module):
+    def __init__(self, clamp_thr: float = 0.9999999):
+        super().__init__()
+        self.clamp_thr = clamp_thr
+        self._initialized = False
+        from fastmap.cuda import rotation_gradient
+
+        self.gradient_fn = rotation_gradient
+
+    @torch.no_grad()
+    def forward(
+        self,
+        R_rel: torch.Tensor,  # float (B, 3, 3)
+        R_w2c1: torch.Tensor,  # float (B, 3, 3)
+        R_w2c2: torch.Tensor,  # float (B, 3, 3)
+    ):
+        if not self._initialized:
+            # make sure everything is contiguous
+            assert R_rel.is_contiguous()
+            assert R_w2c1.is_contiguous()
+            assert R_w2c2.is_contiguous()
+
+            # get device and dtype
+            device = R_rel.device
+            dtype = R_rel.dtype
+
+            # initialize the output tensors
+            self.loss = torch.zeros((1,), device=device, dtype=dtype)  # scalar
+            self.d_R_w2c1 = torch.zeros_like(R_w2c1)  # (B,3,3)
+            self.d_R_w2c2 = torch.zeros_like(R_w2c2)  # (B,3,3)
+
+            # set flag
+            self._initialized = True
+
+        self.gradient_fn(
+            R_rel=R_rel,
+            R_w2c1=R_w2c1,
+            R_w2c2=R_w2c2,
+            loss=self.loss,
+            d_R_w2c1=self.d_R_w2c1,
+            d_R_w2c2=self.d_R_w2c2,
+            clamp_thr=self.clamp_thr,
+        )
+
+        return (
+            self.loss,
+            self.d_R_w2c1,
+            self.d_R_w2c2,
+        )
+
+
 @torch.no_grad()
 def loop(
     R_w2c: torch.Tensor,
@@ -298,6 +401,14 @@ def loop(
     image_idx1 = image_pairs.image_idx1[image_pair_mask]  # (num_image_pairs,)
     image_idx2 = image_pairs.image_idx2[image_pair_mask]  # (num_image_pairs,)
     del image_pairs, image_pair_mask
+
+    try:
+        compute_gradent = CUDAComputeGradientModule()
+    except ImportError:
+        logger.warning(
+            "CUDA kernel extension for global rotation alignment is not available, falling back to the slower PyTorch implementation."
+        )
+        compute_gradent = TorchComputeGradientModule()
 
     ##### Finetune with gradient descent #####
     with torch.enable_grad():
@@ -325,17 +436,21 @@ def loop(
                 torch.index_select(input=params, dim=0, index=image_idx2)
             )  # (num_trainable_image_pairs, 3, 3)
 
-            # compute loss
-            loss = compute_rotation_angle_error(
-                R1=rotation @ R_w2c1,
-                R2=R_w2c2,
-                clamp_value=0.9999999,
-                use_degree=False,
-            ).mean()
+            # compute gradient
+            loss, d_R_w2c1, d_R_w2c2 = compute_gradent(
+                R_w2c1=R_w2c1,
+                R_w2c2=R_w2c2,
+                R_rel=rotation,
+            )
+
+            # backward to parameters
+            optimizer.zero_grad()
+            torch.autograd.backward(
+                tensors=[R_w2c1, R_w2c2],
+                grad_tensors=[d_R_w2c1, d_R_w2c2],
+            )
 
             # gradient step
-            optimizer.zero_grad()
-            loss.backward()
             optimizer.step()
 
             # check convergence

@@ -1,7 +1,5 @@
-# FastMap: Revisiting Dense and Scalable Structure from Motion
-A fast and simple structure from motion pipeline written in Pytorch, focusing on images densely covering a scene for dense 3D reconstruction applications such as NeRFs.
-
-**NOTE**: *We recently tested the newly added GPU support in GLOMAP. Paired with powerful CPUs, it runs much faster than the pure CPU version, and the speed gap between FastMap and GLOMAP is smaller than reported in the current version of the paper. We are trying to get more detailed timing results on different hardware configurations and will report them soon.*
+# FastMap: Revisiting Structure from Motion through First-Order Optimization
+A fast and simple structure from motion pipeline written in Pytorch with optional custom CUDA kernel acceleration, focusing on images densely covering a scene for dense 3D reconstruction applications such as NeRFs.
 
 \[[Paper](http://arxiv.org/abs/2505.04612)\] \[[Project Page](https://jiahao.ai/fastmap)\]
 
@@ -18,6 +16,10 @@ pip install trimesh "pyglet<2" pyyaml dacite loguru prettytable psutil
 pip install git+https://github.com/jiahaoli95/pyrender.git
 ```
 3. Install [COLMAP](https://colmap.github.io/install.html) following the instructions in the official website. If you already have the matching databases (see below) and want to run FastMap starting from that, this step is optional.
+4. (Optional but **highly recommended** for speed) Compile the custom CUDA kernels:
+```bash
+python setup.py build_ext --inplace
+```
 
 ## Usage
 
@@ -89,10 +91,6 @@ If FastMap fails on a database but other methods such as COLMAP succeed, you can
 ## Data and Reproduction
 Images, pre-computed databases and ground truths to reproduce our benchmarks are hosted [here](https://huggingface.co/datasets/whc/fastmap_sfm). Download a subset to start playing with FastMap. 
 
-GLOMAP/COLMAP container:
-- the singularity container `.sif` is in the data repo.
-- the docker container and Dockerfile are [here](https://hub.docker.com/r/haochenw/glomap/tags)
-
 ## Limitations
 This method works best on datasets with high quality images intended for dense 3D reconstruction (e.g. as a proprocessing step before NeRF). It trade robustness for simplicity and speed, so is not particularly careful in countering the negative effect of outlier matches. In cases like sparse scene coverage, low quality matching, degenerate motions (e.g. colinear translation), it is less robust than COLMAP and GLOMAP, and is prone to catastrophic failures.
 
@@ -101,13 +99,13 @@ If you use this tool for your research please cite the following paper
 ```bibtex
 @article{2505.04612v1,
     Author        = {Jiahao Li and Haochen Wang and Muhammad Zubair Irshad and Igor Vasiljevic and Matthew R. Walter and Vitor Campagnolo Guizilini and Greg Shakhnarovich},
-    Title         = {FastMap: Revisiting Dense and Scalable Structure from Motion},
-    Eprint        = {2505.04612v1},
+    Title         = {FastMap: Revisiting Structure from Motion through First-Order Optimization},
+    Eprint        = {2505.04612},
     ArchivePrefix = {arXiv},
     PrimaryClass  = {cs.CV},
     Year          = {2025},
     Month         = {May},
-    Url           = {http://arxiv.org/abs/2505.04612v1},
-    File          = {2505.04612v1.pdf}
+    Url           = {http://arxiv.org/abs/2505.04612},
+    File          = {2505.04612v3.pdf}
 }
 ```

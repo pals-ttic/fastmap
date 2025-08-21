@@ -1,0 +1,12 @@
+CompileFlags:
+  Remove: [
+    "--compiler-options",
+    "-gencode=arch=compute_86,code=sm_86",
+    "-gencode=arch=compute_86,code=compute_86",
+    "--expt-relaxed-constexpr",
+    "--generate-code",
+    "--use_fast_math",
+    "-ccbin",
+    "--dependency-output",
+    "--generate-dependencies-with-compile",
+  ]

@@ -30,6 +30,83 @@ class TranslationParameters(nn.Module):
         return t_c2w
 
 
+class TorchComputeGradientModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @torch.no_grad()
+    def forward(
+        self,
+        o1: torch.Tensor,  # float (B, 3)
+        o2: torch.Tensor,  # float (B, 3)
+        o12_gt: torch.Tensor,  # float (B, 3)
+    ):
+        o12 = o2 - o1  # (num_init, num_image_pairs, 3)
+        o12_norm = o12.norm(dim=-1, keepdim=True)  # (num_init, num_image_pairs, 1)
+        o12_normalized = o12 / (o12_norm + 1e-12)  # (num_init, num_image_pairs, 3)
+        loss = F.l1_loss(o12_gt, o12_normalized, reduction="mean")
+        d_o12_normalized = torch.where(o12_normalized > o12_gt, 1.0, -1.0) / len(
+            o12_gt.flatten()
+        )  # (num_init, num_image_pairs, 3)
+        d_o12 = (
+            d_o12_normalized
+            - (o12_normalized * d_o12_normalized).sum(dim=-1, keepdim=True)
+            * o12_normalized
+        ) / o12_norm
+        d_o1 = -d_o12  # (num_init, num_image_pairs, 3)
+        d_o2 = d_o12  # (num_init, num_image_pairs, 3)
+        return loss, d_o1, d_o2
+
+
+class CUDAComputeGradientModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self._initialized = False
+        from fastmap.cuda import translation_gradient
+
+        self.gradient_fn = translation_gradient
+
+    @torch.no_grad()
+    def forward(
+        self,
+        o1: torch.Tensor,  # float (B, 3)
+        o2: torch.Tensor,  # float (B, 3)
+        o12_gt: torch.Tensor,  # float (B, 3)
+    ):
+        if not self._initialized:
+            # make sure everything is contiguous
+            assert o1.is_contiguous()
+            assert o2.is_contiguous()
+            assert o12_gt.is_contiguous()
+
+            # get device and dtype
+            device = o1.device
+            dtype = o1.dtype
+
+            # initialize the output tensors
+            self.loss = torch.zeros((1,), device=device, dtype=dtype)  # scalar
+            self.d_o1 = torch.zeros_like(o1)  # (B, 3)
+            self.d_o2 = torch.zeros_like(o2)  # (B, 3)
+
+            # set flag
+            self._initialized = True
+
+        self.gradient_fn(
+            o1=o1,
+            o2=o2,
+            o12_gt=o12_gt,
+            loss=self.loss,
+            d_o1=self.d_o1,
+            d_o2=self.d_o2,
+        )
+
+        return (
+            self.loss,
+            self.d_o1,
+            self.d_o2,
+        )
+
+
 @torch.no_grad()
 def loop(
     t_w2c: torch.Tensor,
@@ -61,8 +138,16 @@ def loop(
     # compute the gt target
     R_c2w2 = R_w2c[image_idx2].transpose(-1, -2)  # (num_image_pairs, 3, 3)
     o12_gt = torch.einsum("bij,bj->bi", R_c2w2, -translation)  # (num_image_pairs, 3)
-    o12_gt = o12_gt.expand(num_init, -1, -1)  # (num_init, num_image_pairs, 3)
+    o12_gt = o12_gt.expand(num_init, -1, -1).clone()  # (num_init, num_image_pairs, 3)
     del R_c2w2
+
+    try:
+        compute_gradients = CUDAComputeGradientModule()
+    except ImportError:
+        logger.warning(
+            "CUDA kernel extension for global translation alignment is not available, falling back to the slower PyTorch implementation."
+        )
+        compute_gradients = TorchComputeGradientModule()
 
     # construct the parameters
     t_c2w = torch.einsum(
@@ -92,20 +177,19 @@ def loop(
             o2 = torch.index_select(
                 input=t_c2w, dim=1, index=image_idx2
             )  # (num_init, num_image_pairs, 3)
-            o12_pred = F.normalize(o2 - o1, dim=-1)  # (num_init, num_image_pairs, 3)
-            # loss = (
-            #     (o12_gt[None] - o12_pred).abs().mean(dim=-1)
-            # )  # (num_init, num_image_pairs,)
 
-            # get loss
-            loss = F.l1_loss(o12_gt, o12_pred, reduction="none").mean(
-                dim=-1
-            )  # (num_init, num_image_pairs,)
-            loss = loss.mean()  # (,)
+            # compute gradients
+            loss, d_o1, d_o2 = compute_gradients(o1=o1, o2=o2, o12_gt=o12_gt)
+
+            # backward to parameters
+            optimizer.zero_grad()
+            torch.autograd.backward(
+                tensors=[o1, o2],
+                grad_tensors=[d_o1, d_o2],
+                retain_graph=False,
+            )
 
             # gradient step
-            optimizer.zero_grad()
-            loss.backward()
             optimizer.step()
 
             # check convergence

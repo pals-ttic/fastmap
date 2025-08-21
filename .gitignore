@@ -16,6 +16,9 @@ install-release/
 data/
 doc/_build
 
+# Compile database
+compile_commands.json
+
 # Compiled Object files
 *.slo
 *.lo
