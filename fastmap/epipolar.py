@@ -1,14 +1,8 @@
 import os
-
-os.environ["TORCHINDUCTOR_FORCE_DISABLE_CACHES"] = (
-    "1"  # disable torchinductor cache for accurate timing
-)
-
 from loguru import logger
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.profiler import profile, ProfilerActivity
 
 from fastmap.timer import timer
 from fastmap.container import PointPairs, Cameras, Images
@@ -20,7 +14,6 @@ from fastmap.utils import (
     vector_to_skew_symmetric_matrix,
 )
 from fastmap.utils import ConvergenceManager
-from fastmap.cuda import epipolar_gradient
 
 
 class EpipolarAdjustmentParameters(nn.Module):
@@ -303,6 +296,9 @@ class CUDAComputeGradientModule(nn.Module):
     def __init__(self):
         super().__init__()
         self._initialized = False
+        from fastmap.cuda import epipolar_gradient
+
+        self.gradient_fn = epipolar_gradient
 
     @torch.no_grad()
     def forward(
@@ -348,7 +344,7 @@ class CUDAComputeGradientModule(nn.Module):
             # set flag
             self._initialized = True
 
-        epipolar_gradient(
+        self.gradient_fn(
             R1=R1,
             R2=R2,
             t1=t1,
@@ -382,13 +378,14 @@ class CUDAComputeGradientModule(nn.Module):
 
 
 class ComputeGradient:
-    def __init__(self, pure_torch: bool = False):
-        if pure_torch:
-            self.module = TorchComputeGradientModule().eval()
-        else:
-            self.module = CUDAComputeGradientModule().eval()
-        # self.module = torch.compile(self.module, mode="max-autotune")
-        # self.module = torch.compile(self.module, mode="reduce-overhead")
+    def __init__(self):
+        try:
+            self.compute_gradients = CUDAComputeGradientModule()
+        except ImportError:
+            logger.warning(
+                "CUDA kernel extension for epipolar adjustment is not available, falling back to the slower PyTorch implementation."
+            )
+            self.compute_gradients = TorchComputeGradientModule()
 
     def __call__(
         self,
@@ -408,7 +405,7 @@ class ComputeGradient:
         f1_inv = inv_focal_scale[camera_idx1]  # (B,)
         f2_inv = inv_focal_scale[camera_idx2]  # (B,)
 
-        loss, d_R1, d_R2, d_t1, d_t2, d_f1_inv, d_f2_inv = self.module(
+        loss, d_R1, d_R2, d_t1, d_t2, d_f1_inv, d_f2_inv = self.compute_gradients(
             R1=R1,
             R2=R2,
             t1=t1,
@@ -704,7 +701,6 @@ def loop(
     convergence_manager.start()
 
     # computation module
-    # computation_module = ComputationModule()
     compute_gradients = ComputeGradient()
 
     ##### Optimization loop #####

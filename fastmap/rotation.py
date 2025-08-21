@@ -11,7 +11,6 @@ from fastmap.utils import (
     ConvergenceManager,
     find_connected_components,
 )
-from fastmap.cuda import rotation_gradient
 
 
 def compute_rotation_angle_error(R1, R2, clamp_value=1.0, use_degree=True):
@@ -280,33 +279,21 @@ def initialization(
     return R_w2c
 
 
-def old_compute_gradent(
-    R_w2c1: torch.Tensor,
-    R_w2c2: torch.Tensor,
-    R_rel: torch.Tensor,
-):
-    # compute loss
-    loss = compute_rotation_angle_error(
-        R1=R_rel @ R_w2c1,
-        R2=R_w2c2,
-        clamp_value=0.9999999,
-        use_degree=False,
-    ).mean()
-    d_R_w2c1, d_R_w2c2 = torch.autograd.grad(
-        outputs=loss, inputs=(R_w2c1, R_w2c2), retain_graph=False
-    )  # (B, 3, 3), (B, 3, 3)
-    return loss, d_R_w2c1, d_R_w2c2
+class TorchComputeGradientModule(nn.Module):
+    def __init__(self, clamp_thr: float = 0.9999999):
+        super().__init__()
+        self.clamp_thr = clamp_thr
 
-
-class HandWrittenFunction(torch.autograd.Function):
-    @staticmethod
+    @torch.no_grad()
     def forward(
-        ctx,
-        R1: torch.Tensor,
-        R2: torch.Tensor,
-        clamp_thr: float = 0.9999999,
-        use_degree: bool = False,
+        self,
+        R_rel: torch.Tensor,  # float (B, 3, 3)
+        R_w2c1: torch.Tensor,  # float (B, 3, 3)
+        R_w2c2: torch.Tensor,  # float (B, 3, 3)
     ):
+        clamp_thr = self.clamp_thr
+        R1 = R_rel @ R_w2c1  # (B, 3, 3)
+        R2 = R_w2c2  # (B, 3, 3)
         # Frobenius inner product: tr(R1^T R2) = sum_ij R1_ij * R2_ij
         trace = (R1 * R2).sum(dim=(-1, -2))  # shape (...,)
         cos_value = (trace - 1.0) * 0.5  # shape (...,)
@@ -316,22 +303,8 @@ class HandWrittenFunction(torch.autograd.Function):
         )  # detach-free clamp
         angle = torch.acos(cos_value_clamped)  # radians
         loss = angle.mean()  # shape ()
-        ctx.save_for_backward(
-            R1,
-            R2,
-            cos_value_clamped,
-            clamp_mask,
-        )
-        return loss  # shape (...,)
 
-    @staticmethod
-    def backward(ctx, *grad_output):
-        (d_loss,) = grad_output  # shape (...,)
-        R1, R2, cos_value_clamped, clamp_mask = ctx.saved_tensors
-
-        d_angle = (
-            d_loss / len(R1) * torch.ones((len(R1),), device=R1.device, dtype=R1.dtype)
-        )
+        d_angle = torch.ones((len(R1),), device=R1.device, dtype=R1.dtype) / len(R1)
 
         d_cos_value_clamped = -d_angle / torch.sqrt(
             1.0 - cos_value_clamped * cos_value_clamped
@@ -346,75 +319,10 @@ class HandWrittenFunction(torch.autograd.Function):
         d_R1 = d_trace[..., None, None] * R2  # shape (..., 3, 3)
         d_R2 = d_trace[..., None, None] * R1  # shape (..., 3, 3)
 
-        return d_R1, d_R2, None, None  # None for clamp_thr and use_degree
+        d_R_w2c1 = R_rel.transpose(-1, -2) @ d_R1  # (B, 3, 3)
+        d_R_w2c2 = d_R2  # (B, 3, 3)
 
-
-def flat_compute_gradient(
-    R_w2c1: torch.Tensor,
-    R_w2c2: torch.Tensor,
-    R_rel: torch.Tensor,
-    clamp_thr: float = 0.9999999,
-):
-    R1 = R_rel @ R_w2c1  # (B, 3, 3)
-    R2 = R_w2c2  # (B, 3, 3)
-    # Frobenius inner product: tr(R1^T R2) = sum_ij R1_ij * R2_ij
-    trace = (R1 * R2).sum(dim=(-1, -2))  # shape (...,)
-    cos_value = (trace - 1.0) * 0.5  # shape (...,)
-    clamp_mask = (cos_value > -clamp_thr) & (cos_value < clamp_thr)
-    cos_value_clamped = cos_value.clamp(
-        min=-clamp_thr, max=clamp_thr
-    )  # detach-free clamp
-    angle = torch.acos(cos_value_clamped)  # radians
-    loss = angle.mean()  # shape ()
-
-    d_angle = torch.ones((len(R1),), device=R1.device, dtype=R1.dtype) / len(R1)
-
-    d_cos_value_clamped = -d_angle / torch.sqrt(
-        1.0 - cos_value_clamped * cos_value_clamped
-    )
-
-    d_cos_value = d_cos_value_clamped * clamp_mask.to(
-        d_cos_value_clamped
-    )  # shape (...,)
-
-    d_trace = d_cos_value * 0.5  # shape (...,)
-
-    d_R1 = d_trace[..., None, None] * R2  # shape (..., 3, 3)
-    d_R2 = d_trace[..., None, None] * R1  # shape (..., 3, 3)
-
-    d_R_w2c1 = R_rel.transpose(-1, -2) @ d_R1  # (B, 3, 3)
-    d_R_w2c2 = d_R2  # (B, 3, 3)
-
-    return loss, d_R_w2c1, d_R_w2c2, d_trace
-
-
-def torch_compute_gradent(
-    R_w2c1: torch.Tensor,
-    R_w2c2: torch.Tensor,
-    R_rel: torch.Tensor,
-):
-
-    clamp_value = 0.9999999
-
-    # R1 = R_rel @ R_w2c1  # (B, 3, 3)
-    # R2 = R_w2c2  # (B, 3, 3)
-    # loss = HandWrittenFunction.apply(
-    #     R1,
-    #     R2,
-    #     clamp_value,
-    #     False,
-    # )  # (B, 3, 3)
-    # d_R_w2c1, d_R_w2c2 = torch.autograd.grad(
-    #     outputs=loss, inputs=(R_w2c1, R_w2c2), retain_graph=False
-    # )  # (B, 3, 3), (B, 3, 3)
-
-    loss, d_R_w2c1, d_R_w2c2 = flat_compute_gradient(
-        R_w2c1=R_w2c1,
-        R_w2c2=R_w2c2,
-        R_rel=R_rel,
-        clamp_thr=clamp_value,
-    )  # (B, 3, 3), (B, 3, 3)
-    return loss, d_R_w2c1, d_R_w2c2
+        return loss, d_R_w2c1, d_R_w2c2
 
 
 class CUDAComputeGradientModule(nn.Module):
@@ -422,6 +330,9 @@ class CUDAComputeGradientModule(nn.Module):
         super().__init__()
         self.clamp_thr = clamp_thr
         self._initialized = False
+        from fastmap.cuda import rotation_gradient
+
+        self.gradient_fn = rotation_gradient
 
     @torch.no_grad()
     def forward(
@@ -448,7 +359,7 @@ class CUDAComputeGradientModule(nn.Module):
             # set flag
             self._initialized = True
 
-        rotation_gradient(
+        self.gradient_fn(
             R_rel=R_rel,
             R_w2c1=R_w2c1,
             R_w2c2=R_w2c2,
@@ -491,7 +402,13 @@ def loop(
     image_idx2 = image_pairs.image_idx2[image_pair_mask]  # (num_image_pairs,)
     del image_pairs, image_pair_mask
 
-    compute_gradent = CUDAComputeGradientModule()  # jiahao debug
+    try:
+        compute_gradent = CUDAComputeGradientModule()
+    except ImportError:
+        logger.warning(
+            "CUDA kernel extension for global rotation alignment is not available, falling back to the slower PyTorch implementation."
+        )
+        compute_gradent = TorchComputeGradientModule()
 
     ##### Finetune with gradient descent #####
     with torch.enable_grad():

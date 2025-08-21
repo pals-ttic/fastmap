@@ -5,7 +5,6 @@ import torch.nn.functional as F
 
 from fastmap.container import ImagePairs
 from fastmap.utils import ConvergenceManager, geometric_median
-from fastmap.cuda import translation_gradient
 
 
 class TranslationParameters(nn.Module):
@@ -31,47 +30,41 @@ class TranslationParameters(nn.Module):
         return t_c2w
 
 
-def old_compute_gradients(
-    o1: torch.Tensor,
-    o2: torch.Tensor,
-    o12_gt: torch.Tensor,
-):
-    o12_pred = F.normalize(o2 - o1, dim=-1)  # (num_init, num_image_pairs, 3)
-    loss = F.l1_loss(o12_gt, o12_pred, reduction="none").mean(
-        dim=-1
-    )  # (num_init, num_image_pairs,)
-    loss = loss.mean()  # (,)
-    d_o1, d_o2 = torch.autograd.grad(
-        outputs=loss, inputs=(o1, o2), retain_graph=False
-    )  # (B, 3, 3), (B, 3, 3)
-    return loss, d_o1, d_o2
+class TorchComputeGradientModule(nn.Module):
+    def __init__(self):
+        super().__init__()
 
-
-def compute_gradients(
-    o1: torch.Tensor,
-    o2: torch.Tensor,
-    o12_gt: torch.Tensor,
-):
-    o12 = o2 - o1  # (num_init, num_image_pairs, 3)
-    o12_norm = o12.norm(dim=-1, keepdim=True)  # (num_init, num_image_pairs, 1)
-    o12_normalized = o12 / (o12_norm + 1e-12)  # (num_init, num_image_pairs, 3)
-    loss = F.l1_loss(o12_gt, o12_normalized, reduction="mean")
-    d_o12_normalized = torch.where(o12_normalized > o12_gt, 1.0, -1.0) / len(
-        o12_gt.flatten()
-    )  # (num_init, num_image_pairs, 3)
-    d_o12 = (
-        d_o12_normalized
-        - (o12_normalized * d_o12_normalized).sum(dim=-1, keepdim=True) * o12_normalized
-    ) / o12_norm
-    d_o1 = -d_o12  # (num_init, num_image_pairs, 3)
-    d_o2 = d_o12  # (num_init, num_image_pairs, 3)
-    return loss, d_o1, d_o2, o12_normalized, d_o12_normalized, d_o12
+    @torch.no_grad()
+    def forward(
+        self,
+        o1: torch.Tensor,  # float (B, 3)
+        o2: torch.Tensor,  # float (B, 3)
+        o12_gt: torch.Tensor,  # float (B, 3)
+    ):
+        o12 = o2 - o1  # (num_init, num_image_pairs, 3)
+        o12_norm = o12.norm(dim=-1, keepdim=True)  # (num_init, num_image_pairs, 1)
+        o12_normalized = o12 / (o12_norm + 1e-12)  # (num_init, num_image_pairs, 3)
+        loss = F.l1_loss(o12_gt, o12_normalized, reduction="mean")
+        d_o12_normalized = torch.where(o12_normalized > o12_gt, 1.0, -1.0) / len(
+            o12_gt.flatten()
+        )  # (num_init, num_image_pairs, 3)
+        d_o12 = (
+            d_o12_normalized
+            - (o12_normalized * d_o12_normalized).sum(dim=-1, keepdim=True)
+            * o12_normalized
+        ) / o12_norm
+        d_o1 = -d_o12  # (num_init, num_image_pairs, 3)
+        d_o2 = d_o12  # (num_init, num_image_pairs, 3)
+        return loss, d_o1, d_o2
 
 
 class CUDAComputeGradientModule(nn.Module):
     def __init__(self):
         super().__init__()
         self._initialized = False
+        from fastmap.cuda import translation_gradient
+
+        self.gradient_fn = translation_gradient
 
     @torch.no_grad()
     def forward(
@@ -98,7 +91,7 @@ class CUDAComputeGradientModule(nn.Module):
             # set flag
             self._initialized = True
 
-        translation_gradient(
+        self.gradient_fn(
             o1=o1,
             o2=o2,
             o12_gt=o12_gt,
@@ -148,7 +141,13 @@ def loop(
     o12_gt = o12_gt.expand(num_init, -1, -1).clone()  # (num_init, num_image_pairs, 3)
     del R_c2w2
 
-    compute_gradients = CUDAComputeGradientModule()  # jiahao debug
+    try:
+        compute_gradients = CUDAComputeGradientModule()
+    except ImportError:
+        logger.warning(
+            "CUDA kernel extension for global translation alignment is not available, falling back to the slower PyTorch implementation."
+        )
+        compute_gradients = TorchComputeGradientModule()
 
     # construct the parameters
     t_c2w = torch.einsum(
