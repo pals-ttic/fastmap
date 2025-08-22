@@ -97,15 +97,10 @@ This method works best on datasets with high quality images intended for dense 3
 ## BibTeX
 If you use this tool for your research please cite the following paper
 ```bibtex
-@article{2505.04612v1,
-    Author        = {Jiahao Li and Haochen Wang and Muhammad Zubair Irshad and Igor Vasiljevic and Matthew R. Walter and Vitor Campagnolo Guizilini and Greg Shakhnarovich},
-    Title         = {FastMap: Revisiting Structure from Motion through First-Order Optimization},
-    Eprint        = {2505.04612},
-    ArchivePrefix = {arXiv},
-    PrimaryClass  = {cs.CV},
-    Year          = {2025},
-    Month         = {May},
-    Url           = {http://arxiv.org/abs/2505.04612},
-    File          = {2505.04612v3.pdf}
+@article{fastmap2025,
+    author        = {Jiahao Li and Haochen Wang and Muhammad Zubair Irshad and Igor Vasiljevic and Matthew R. Walter and Vitor Campagnolo Guizilini and Greg Shakhnarovich},
+    title         = {FastMap: Revisiting Structure from Motion through First-Order Optimization},
+    journal       = {https://arxiv.org/abs/2505.04612},
+    year          = {2025},
 }
 ```
