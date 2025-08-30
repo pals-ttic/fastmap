@@ -1,5 +1,5 @@
 import typing
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from enum import Enum
 from dataclasses import dataclass
 import torch
@@ -593,9 +593,9 @@ class Points3D:
     # torch.Tensor, float, shape=(num_points,), mean reprojection error in pixels
     error: torch.Tensor
     # List[List[int]], a list of length `num_points`, each element is a list of image idx in the corresponding track
-    track_image_idx: List[List[int]]
-    # List[List[int]], a list of length `num_points`, each element is a list of local keypoint idx in the corresponding image
-    track_keypoint_idx: List[List[int]]
+    image_idx_lists: List[List[int]]
+    # List[List[int]], a list of length `num_points`, each element is a list of (X, Y) pixel coordinates of the 2D keypoints in the corresponding track
+    xy_pixels_lists: List[List[Tuple[float, float]]]
 
     @property
     @torch.no_grad()

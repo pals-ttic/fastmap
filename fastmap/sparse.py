@@ -325,8 +325,8 @@ def sparse_reconstruction(
         xyz=xyz[valid_points3d_mask],
         rgb=color3d[valid_points3d_mask],
         error=error3d[valid_points3d_mask],
-        track_image_idx=[],
-        track_keypoint_idx=[],
+        image_idx_lists=[],
+        xy_pixels_lists=[],
     )
     del xyz, color3d, error3d
     assert container.xyz.dtype == dtype
@@ -338,15 +338,17 @@ def sparse_reconstruction(
     assert not torch.any(torch.isinf(container.error))
 
     # fetch the keypoint mask, image idx and keypoint idx for each 2D point from GPU to lists on CPU
-    image_idx_list = tracks.image_idx.tolist()  # List[int] (num_points2d,)
-    keypoint_idx_list = tracks.keypoint_idx.tolist()  # List[int] (num_points2d,)
+    tracks_image_idx_list = tracks.image_idx.tolist()  # List[int] (num_points2d,)
+    tracks_xy_pixels_list = (
+        tracks.xy_pixels.tolist()
+    )  # List[List[float]] (num_points2d, 2)
     valid_points2d_mask_list = (
         valid_points2d_mask.tolist()
     )  # List[bool] (num_points2d,)
     del valid_points2d_mask
     assert (
-        len(image_idx_list)
-        == len(keypoint_idx_list)
+        len(tracks_image_idx_list)
+        == len(tracks_xy_pixels_list)
         == len(valid_points2d_mask_list)
         == num_points2d
     )
@@ -366,22 +368,26 @@ def sparse_reconstruction(
         ]  # List[bool] (num_points2d_for_track,)
 
         # get the image indices and keypoint indices
-        track_image_idx = [
+        image_idx_list = [
             x
-            for x, mask_value in zip(image_idx_list[start_idx:end_idx], mask_list)
+            for x, mask_value in zip(
+                tracks_image_idx_list[start_idx:end_idx], mask_list
+            )
             if mask_value
         ]
-        track_keypoint_idx = [
-            x
-            for x, mask_value in zip(keypoint_idx_list[start_idx:end_idx], mask_list)
+        xy_pixels_list = [
+            tuple(x)
+            for x, mask_value in zip(
+                tracks_xy_pixels_list[start_idx:end_idx], mask_list
+            )
             if mask_value
         ]
-        assert len(track_image_idx) == len(track_keypoint_idx)
-        assert len(track_image_idx) > 0
+        assert len(image_idx_list) == len(xy_pixels_list)
+        assert len(image_idx_list) > 0
 
         # add to lists
-        container.track_image_idx.append(track_image_idx)
-        container.track_keypoint_idx.append(track_keypoint_idx)
+        container.image_idx_lists.append(image_idx_list)
+        container.xy_pixels_lists.append(xy_pixels_list)
 
     # make sure the results are consistent
     num_valid_points3d = valid_points3d_mask.long().sum().item()
@@ -390,8 +396,8 @@ def sparse_reconstruction(
     assert container.xyz.shape == (container.num_points, 3)
     assert container.rgb.shape == (container.num_points, 3)
     assert container.error.shape == (container.num_points,)
-    assert container.num_points == len(container.track_image_idx)
-    assert container.num_points == len(container.track_keypoint_idx)
+    assert container.num_points == len(container.image_idx_lists)
+    assert container.num_points == len(container.xy_pixels_lists)
     logger.info("Points3D container built.")
 
     ##### Log #####
@@ -401,10 +407,10 @@ def sparse_reconstruction(
     logger.info(f"Mean re-projection error: {container.error.mean().item()} pixels")
     logger.info(f"Max re-projection error: {container.error.max().item()} pixels")
     logger.info(
-        f"Mean track length: {sum(len(x) for x in container.track_image_idx) / container.num_points:.2f}"
+        f"Mean track length: {sum(len(x) for x in container.image_idx_lists) / container.num_points:.2f}"
     )
-    logger.info(f"Min track length: {min(len(x) for x in container.track_image_idx)}")
-    logger.info(f"Max track length: {max(len(x) for x in container.track_image_idx)}")
+    logger.info(f"Min track length: {min(len(x) for x in container.image_idx_lists)}")
+    logger.info(f"Max track length: {max(len(x) for x in container.image_idx_lists)}")
 
     ##### Return #####
     return container
