@@ -1,7 +1,7 @@
-# FastMap: Revisiting Structure from Motion through First-Order Optimization
+# FastMap
 A fast and simple structure from motion pipeline written in Pytorch with optional custom CUDA kernel acceleration, focusing on images densely covering a scene for dense 3D reconstruction applications such as NeRFs.
 
-\[[Paper](http://arxiv.org/abs/2505.04612)\] \[[Project Page](https://jiahao.ai/fastmap)\]
+\[[Paper (3DV 2026 Oral)](http://arxiv.org/abs/2505.04612)\] \[[Project Page](https://jiahao.ai/fastmap)\]
 
 ![teaser](assets/teaser.png)
 
